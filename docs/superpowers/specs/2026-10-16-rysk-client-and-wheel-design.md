@@ -65,8 +65,9 @@ JavaScript), **docs** (Rysk documentation), **inferred**. Detail in `docs/rysk-p
   maximum 5000 contracts per trade, e18 quantities in multiples of the minimum. Inventory strikes are
   delta buckets (about 0.07/0.10/0.22/0.30/0.35/0.40 per side) regenerated as spot moves, over four
   expiries. Expiries are usually Friday 08:00 UTC but are read from data, never assumed.
-- Rysk's displayed APR is `price / strike × 365 / T` for puts and `price / spot × 365 / T` for calls, `T` in
-  days to expiry. **live**: our formula matched `quote.apy` within 0.1 point on all three spike quotes.
+- Rysk's displayed APR is `price / strike × 365.25 / T` for puts and `price / spot × 365.25 / T` for calls,
+  `T` in days to expiry. **live**: with a 365.25-day year our formula reproduces `quote.apy` on all three
+  spike quotes (75.3297 vs 75.3300) and the real fill's 62.83 %.
 - The inventory's indicative `apy` understates real quotes by 1.4× to 2.6×, unevenly (**live**, five
   fills and three quotes). It can rank candidates; it must never be used to apply the APR floor.
   Inventory `bid`/`ask` are zero for HYPE.
@@ -187,8 +188,8 @@ public RPC is flaky; the README recommends a provider URL.
 ### 5.3 ERC-20 approve
 
 `approve(token, spender, amount): Promise<Hex>` returns the hash; `waitForReceipt(hash, timeoutMs)` is a
-separate call so a timed-out approve still has a recorded hash. Rules: skip if `allowance ≥ amount`;
-refuse if `pendingNonce ≠ latestNonce` (one transaction in flight, far from the 8-nonce mempool limit);
+separate call so a timed-out approve still has a recorded hash. Rules: approve exactly `amount` whenever
+`allowance ≠ amount` (an approve overwrites a stale allowance); refuse if `pendingNonce ≠ latestNonce` (one transaction in flight, far from the 8-nonce mempool limit);
 viem EIP-1559 defaults with a configurable `maxFeePerGasGwei` cap; wait 60 s; after 5 min unmined, one
 replacement at the same nonce with +30 % fees; otherwise `stuck`. Re-read the allowance after mining.
 Never unlimited approvals.
@@ -226,10 +227,12 @@ collateral `1962500000`, premium `47486300`, APR 62.83 %) and the spike quotes:
 - `collateralForCall(qE18, decimals) = qE18 / 10^(18 − decimals)`; `collateralForPut(qE18, strikeE8) = qE18 × strikeE8 / 10^20`.
 - `putQuantityFromUsd(usd6, strikeE8) = usd6 × 10^20 / strikeE8`.
 - `premium6(qE18, priceE18) = qE18 × priceE18 / 10^30` (floor; equals the API's `premium`).
-- `aprFraction(net6, collateral6, nowSec, expirySec) = net6 / collateral6 × 365 × 86400 / (expirySec − nowSec)`,
+- `aprFraction(net6, collateral6, nowSec, expirySec) = net6 / collateral6 × 31_557_600 / (expirySec − nowSec)`
+  (a 365.25-day year, which is what Rysk uses),
   with `collateral6 = qE18 × strikeE8 / 10^20` (put) or `qE18 × spotE8 / 10^20` (call).
 - `minPriceE18ForApr(aprFloor, collateral6, qE18, nowSec, expirySec, gasFee6)`: the price at which the net
-  APR equals the floor; used by execution as an absolute floor (§7.1).
+  APR equals the floor (same 365.25-day year); used by execution as the REQUOTE screen (§7.1), not as the
+  final floor check, which C8 re-applies with the real gas fee.
 
 ### 6.4 Inventory, assets, caps parsing
 
@@ -237,13 +240,16 @@ Per-item parsing: an invalid combination, asset or cap is dropped with a counted
 fail. `Listing.products[].collateralAsset` comes from the product entry's `asset`/`collateralAsset`; the RFQ
 asset is the underlying from `assets`. `spotE8` is `assets[WHYPE].price` scaled, and the inventory `index`
 is recorded for display. `remainingCapacityE18(caps, { symbol, asset, isPut }, notionalPriceE8)` returns the
-minimum headroom over `GLOBAL`, the symbol, the asset address and `address-isPut`, pricing puts at strike
-and calls at spot (`domain/caps.ts`, tested on captured caps).
+minimum headroom over `GLOBAL`, the underlying symbol (`HYPE`, not `WHYPE`), the asset address and
+`address-isPut`, pricing puts at strike and calls at spot; entries with `cap == 0` are not enforced and are
+skipped (`domain/caps.ts`, tested on captured caps).
 
 ### 6.5 Positions and settlement
 
-Positions are parsed **strictly**: any invalid row fails the parse and the tick holds (a dropped row would
-corrupt locked capital and the basis). `parsePosition(row)` converts to `bigint` (asserting e18 strikes are
+Rows on chain 999 with underlying WHYPE are parsed **strictly**: any invalid such row fails the parse and
+the tick holds (a dropped row would corrupt locked capital and the basis). All other rows (`foreign`,
+`otherChain`) are parsed only for `chainId` and the row key, enough for the vault-counter comparison; their
+oddities are warnings, never holds. `parsePosition(row)` converts to `bigint` (asserting e18 strikes are
 exact multiples of 1e10 and `premium` is an exact 6-dp value), checksums addresses, and sets:
 
 - `status`: `'open'` (`""`), `'settled'` (`"SETTLED"`), `'unknown'` (anything else, or `isBuy !== true`).
@@ -285,7 +291,8 @@ errors and 5xx (never on 4xx), zod parsing. Methods: `assets`, `inventory`, `cap
   `assetAddress`, `chainId`, `expiry`, `isPut`, `quantity`, `strike`, `usd`, `collateralAsset` against the
   request; a matching frame then must have `isTakerBuy === false` and `nowSec < validUntil ≤ nowSec + 3600`
   (catches a seconds/milliseconds mix-up), else `mismatch`. One request in flight per socket, 250 ms gap.
-- `confirm(params, { timeoutMs = confirmTimeoutMs (60 000) })`: result must match `^0x[0-9a-f]{64}$`.
+- `confirm(params, { timeoutMs = confirmTimeoutMs (60 000) })`: a JSON-RPC `error` is a rejection; a non-error
+  reply whose `result` does not match `/^0x[0-9a-f]{64}$/i` is `unknown('bad-result')`, never a rejection.
 
 ### 6.8 EIP-712
 
@@ -313,44 +320,53 @@ exits: aborted(stage) | reverted | unknown
 
 1. **PRECHECK** (C1–C2): fresh snapshot and state, all gates pass, recomputed quantity equals the intent.
 2. **APPROVE**: `collateralAmount` depends only on strike, quantity and decimals, so approve before the
-   executable quote and do not burn its TTL. `approve` + `waitForReceipt`; `stuck` → `aborted('approve')`.
+   executable quote and do not burn its TTL. Approve exactly `collateralAmount` whenever `allowance ≠
+   collateralAmount` (an approve overwrites a stale larger allowance); `approve` + `waitForReceipt`;
+   `stuck` → `aborted('approve')`. In dry-run this step only reads the allowance and records `wouldApprove`.
 3. **REQUOTE**: if `quote.validUntil − serverNowSec < minQuoteTtlSec` (15), request one fresh quote for the
    same request with `taker = self`. Only a quote held at this step is ever signed. If
    `price < intent.minPriceE18` → `aborted('price-floor')`. No other price tolerance exists.
 4. **GAS**: build our own `ConfirmBody` (§7.3), `gasFee(body)`; `exceeds-premium` or `http` → `aborted('gas')`.
 5. **CHECKS**: the checklist (§7.2). Any failure → `aborted('guard')` with the check id. In dry-run mode
    the function returns `aborted('dry-run', { echoOk, wouldApprove })` here, having exercised body
-   building, the gas echo and every guard against real data.
+   building, the gas echo and every guard against real data; C1 and the allowance clause of C13 are recorded
+   `n/a` in dry-run, every other check runs. The daemon records the simulated deployment (§8.8) only after
+   this result is returned, so the DCA gate inside C2 does not block the dry-run path.
 6. **SIGN**: typed-data hash logged; `signConfirmation`. A `trade-intent` record is appended (write-ahead);
    a failed write aborts.
-7. **CONFIRM**: `signal` checked immediately before sending; the side's cooldown starts **when the message
-   is sent**; `confirm` is sent at most once per signed body and never retried. Timeout 60 s. Reply with
-   `error` → `aborted('confirm-rejected')`; no reply, socket closed or shutdown → `unknown`.
-8. **RECEIPT**: wait 120 s. `status 0` → `reverted` (definitive, collateral unmoved). Success → verify
-   (§5.4); any mismatch → write `data/STOP`, halt live, fatal log. Timeout → `unknown('receipt-timeout')`.
-9. **CHAIN_VERIFIED**: vault counter `== before + 1` and allowance decreased by the amount → `filled`.
+7. **CONFIRM**: `signal` checked immediately before sending; the side's cooldown starts and
+   `memo.lastConfirmSec[side]` is set **when the message is sent**; `confirm` is sent at most once per signed
+   body and never retried. Timeout 60 s. Reply with a JSON-RPC `error` → `aborted('confirm-rejected')` (which
+   clears `lastConfirmSec`); a non-error reply failing the hash regex → `unknown('bad-result')`; no reply,
+   socket closed or shutdown → `unknown`.
+8. **RECEIPT**: wait 120 s. `status 0` → `reverted` (definitive, collateral unmoved; clears
+   `lastConfirmSec`). Success → verify (§5.4); any mismatch → write `data/STOP`, fatal log, and return
+   `unknown('verify-failed')`. Timeout → `unknown('receipt-timeout')`.
+9. **CHAIN_VERIFIED**: vault counter `== before + 1` and allowance decreased by the amount → `filled`;
+   otherwise `STOP` and `unknown('verify-failed')`.
 
 ### 7.2 Pre-sign checklist
 
 | id | check |
 |---|---|
 | C1 | Live mode, no `data/STOP`, lock held, signer address == `config.account.address`, `isEIP1271 = false`. |
-| C2 | Fresh state (≤ 10 s) passes all gates; recomputed tranche quantity equals the intent. |
+| C2 | Fresh state (≤ 10 s) passes all gates, evaluating G8 with the calling execution excluded; recomputed tranche quantity equals the intent. |
 | C3 | Pinned allowlist: `assetAddress` WHYPE; `usd` USDC; `collateralAsset` USDC (put) or WHYPE (call); `chainId 999`; `isTakerBuy false`; `taker == self`. |
 | C4 | Quote echoes the request on every term field (§6.7). |
-| C5 | `maker ∉ {zero, self}`; `quoteNonce` unseen in-process; `recoverQuoteSigner == maker` when `verifyMakerSig: 'enforce'`. |
+| C5 | `maker ∉ {zero, self}`; `quoteNonce` not previously **signed** in-process (a nonce joins the used set at SIGN); `recoverQuoteSigner == maker` when `verifyMakerSig: 'enforce'`. |
 | C6 | `minQuoteTtlSec ≤ validUntil − serverNowSec ≤ maxQuoteTtlSec (600)`, and `validUntil < expiry`. |
 | C7 | `price > 0`; `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral` (0.15); our APR (gas 0) within `aprEchoTolerancePp` (1.0 percentage point) of `quote.apy`. |
-| C8 | `price ≥ intent.minPriceE18`; `net6 ≥ minNetPremium6`. |
-| C9 | Gas echo (§7.3): every sent field equal by kind; extra keys ⊆ the known set; `gasFee` a non-negative integer string with `gasFee6 × 10000 ≤ premium6 × maxGasFeeBps` and `gasFee6 ≤ maxGasFeeUsd` (as 6 dp). |
+| C8 | Normal mode: `aprFraction(premium6 − gasFee6 from the GAS step, collateral6, serverNowSec, expiry) ≥ minApr`. Fallback: `net6 ≥ call.fallback.minNetPremium6`. Both: `net6 ≥ safety.minNetPremium6`. (`minPriceE18` is only the REQUOTE screen.) |
+| C9 | Gas echo (§7.3): every sent field equal by kind; extra keys ⊆ the known set with their expected values; `gasFee` a non-negative integer string with `gasFee6 × 10000 ≤ premium6 × maxGasFeeBps` and `gasFee6 ≤ maxGasFee6` (= `safety.maxGasFeeUsd` as 6 dp). |
 | C10 | Strike vs fresh spot: put `K ∈ [0.6 S, S (1 − minOtmPct)]`, call `K ∈ [S (1 + minOtmPct), 1.4 S]`; `K % strikePrecision == 0`; `K` listed for that expiry within 5 min unless the intent is a custom fallback strike. |
 | C11 | Expiry in the current inventory and within the tenor window (fallback: ≥ `minHoursToExpiry`). |
 | C12 | `qty % minTradeSize == 0`; `minTradeSize ≤ qty ≤ min(maxTradeSize, maxContractsPerTrade)`. |
-| C13 | `collateralAmount` ≤ free balance − reserve, ≤ current allowance, == approved amount. |
+| C13 | `collateralAmount` ≤ free balance − reserve and `allowance == collateralAmount` (`n/a` in dry-run). |
 | C14 | Caps soft check (§8.5). |
 | C15 | Domain pinned; `nonce = String(max(Date.now(), lastNonceMs + 1))`, within 5 s of server time. |
 | C16 | Daily limits including this trade. |
 | C17 | The message is built from a branded `CheckedConfirmBody` that only `checks.ts` can produce. |
+| C18 | Calls only, on the fresh state: `basis.reliable`; normal mode `K ≥ basisE8 × (1 + minStrikeOverBasisPct)`; fallback mode: the fresh `basisEligible` set is still empty and `K` equals the fresh `K*` (or the custom strike). |
 
 ### 7.3 Confirm body and gas echo
 
@@ -368,7 +384,9 @@ echo is `/^\d+$/` or a safe integer and `BigInt` equal; **bool**: strict; **hex*
 field is a mismatch. Extra keys must be a subset of `GAS_ECHO_EXTRA_KEYS` = {`fees`, `gasFee`, `isEIP1271`,
 `isPremium`, `premiumAsset`, `settlementCollateralPayout`, `settlementPayout`, `settlementPayoutAsset`,
 `signature`, `status`, `txHash`, `vaultId`} (from the spike); any other key aborts in live mode and is
-recorded. `gasFee` missing or `""` means `"0"`.
+recorded. Every extra key except `gasFee`, `signature` and `isEIP1271` must carry its spike value (`""`, or
+`false` for `isPremium`); otherwise `aborted('echo')`, recorded, and `STOP` in live. `gasFee` missing or
+`""` means `"0"`.
 
 **Sign** `toConfirmationMessage(body, gasFee6)` — from our body, never from the echo. **Send**
 `{ ...body, ...echoedExtras, gasFee, isEIP1271: false, signature }` where `echoedExtras` are the
@@ -385,7 +403,7 @@ strike, usd, price, quantity`). The full body is used only inside `sellOption`.
 | result | cooldown on the side |
 |---|---|
 | `aborted` before confirm | none |
-| `aborted('confirm-rejected')`, `reverted` | 60 s; three confirm errors per hour or two reverts per 24 h → halt live |
+| `aborted('confirm-rejected')`, `reverted` | 60 s; `memo.lastConfirmSec[side]` is cleared so the DCA interval is not consumed; three confirm errors per hour or two reverts per 24 h → halt live |
 | `filled` | until the txHash appears in the positions API (max `unknownMaxWaitSec`, 1800) |
 | `unknown` | until evidence: a matching row with `createdAt ≥ confirmSentAtSec`, or the vault counter increased (then verify); after `unknownMaxWaitSec` log error and unblock; never re-sign meanwhile |
 
@@ -409,7 +427,9 @@ wallet are unsupported and documented.
 
 ### 8.1 Inputs
 
-`Snapshot` and `WheelConfig` are defined in Appendix A. `nowSec` is the chain block timestamp.
+`Snapshot` is defined in Appendix A; `WheelConfig` is the zod output of Appendix B (§8.9). `nowSec` is the
+chain block timestamp; `localNowMs` is the process clock. The daemon applies per-key backoff and the
+`replanSec` timer before calling `planSide`, so the pure core never sees them.
 
 ### 8.2 State derivation
 
@@ -436,9 +456,9 @@ wallet are unsupported and documented.
    USDT0 and native HYPE are never capital; USDC locked in `foreign` puts reduces `free` without adding to
    `total`, so a dedicated wallet or `maxCapitalUsdc` is recommended.
 4. HYPE basis ledger (§8.4).
-5. `lastDeployTs[side]` = max over that side's managed rows' `createdAt`, the in-memory last confirm time,
-   and (dry-run only) simulated deployments.
-6. `deploymentsLast24h` and `notionalLast24hUsd` from managed rows (rolling 24 h, both sides, including
+5. `lastDeployTs[side]` = max over that side's managed rows' `createdAt`, `memo.lastConfirmSec[side]` (set when
+   a confirm is sent, cleared on `confirm-rejected` and `reverted`), and (dry-run only) simulated deployments.
+6. `deploymentsLast24h` and `notionalLast24h6` from managed rows (rolling 24 h, both sides, including
    manual trades, which errs conservative).
 7. Output `WheelState` (Appendix A) including `anomalies[]` and `warnings[]`.
 
@@ -448,7 +468,7 @@ wallet are unsupported and documented.
 |---|---|---|---|
 | G1 | global | no anomalies and no `unknown` rows | |
 | G2 | global | consistency `'ok'` (`api-lag` or `inconsistent` hold) | |
-| G3 | global | no managed or basis-relevant row is `pendingSettlement`, and `settlementGraceSec` (900) has passed since the newest settled expiry | |
+| G3 | global | no managed or basis-relevant row is `pendingSettlement`, and `settlementGraceSec` (900) has passed since the first tick (in-memory) that saw no pending basis-relevant row; after a restart `startupQuietSec` covers the gap | |
 | G4 | global | rows fetched this tick; block age ≤ 30 s; inventory age ≤ 120 s | |
 | G5 | global | `|local − serverNow| ≤ maxClockSkewMs` (3000) (server time from REST `Date` headers and the block timestamp) | |
 | G6 | global | WHYPE asset active, `marketStatus.isOpen !== false`, HYPE listings present | |
@@ -456,7 +476,7 @@ wallet are unsupported and documented.
 | G8 | global | no execution in flight; `pendingNonce == latestNonce` (`tx-pending`); side not in cooldown | |
 | G9 | live | `nativeHype ≥ minNativeHype` (0.05) | |
 | G10 | global | `data/STOP` absent; `enabled`; frontend version unchanged or `pauseOnFrontendChange` off | |
-| G11 | live | `deploymentsLast24h < maxDeploymentsPer24h` (4); `notionalLast24hUsd < maxNotionalPer24hUsd` (20 000) | |
+| G11 | live | `deploymentsLast24h < maxDeploymentsPer24h` (4); `notionalLast24h6 < maxNotionalPer24h6` (20 000 USD) | |
 | S1 | side | side enabled | |
 | S2 | side | `now − lastDeployTs[side] ≥ minIntervalHours` (24) | |
 | S3 | side | tranche yields ≥ one lot (§8.5) | |
@@ -467,18 +487,22 @@ wallet are unsupported and documented.
 
 Config `basis: { anchor: { ts, qtyWhype, basisUsd }, externalFlows?: [{ ts, qtyWhype (signed), basisUsd? }],
 residualPolicy: 'absorb' | 'block-calls', residualToleranceWhype }`. `anchor.qtyWhype` is the HYPE owned at
-`anchor.ts`: wallet WHYPE plus WHYPE locked in calls open at that instant; `anchor.ts` must not fall inside
-`[expiry, expiry + 6 h]` of any basis-relevant row. `rysk basis suggest-anchor` prints `{ ts: blockTs,
+`anchor.ts`: wallet WHYPE plus WHYPE locked in calls open at that instant. When `call.enabled`, config load
+fails unless `anchor.ts > 0` and `anchor.basisUsd > 0` (the example's zero anchor is a placeholder that would
+otherwise disable the basis rule). If `anchor.ts` falls inside `[expiry, expiry + 6 h]` of any basis-relevant
+row, the basis is unreliable with reason `anchor-in-settlement-window`. `rysk basis suggest-anchor` prints `{ ts: blockTs,
 qtyWhype: H_obs }` so the user supplies only the price.
 
 Events: settled ITM rows with underlying WHYPE and `expiry > anchor.ts`: assigned puts (`managedPut`,
 `whypePutOtherUsd`) **add** `payout` at `strike`; exercised calls (`managedCall`, `whypeCallOtherUsd`)
-**remove** `quantity`; `externalFlows` add or remove at their price (default anchor price). Order: `ts`
-ascending, adds before removes at equal `ts`, then `createdAt`, then `txHash`.
+**remove** `quantity`; `externalFlows` with `ts > anchor.ts` add at their price (default anchor price) or
+remove (removals ignore `basisUsd`). A settled row's event `ts` is its `expirySec`. Order: `ts` ascending;
+at equal `ts`, adds before removes; within the same `ts` and direction, row events before flows, rows by
+`createdAt` then `txHash`, flows in config order.
 
 Replay in exact `bigint` (cost in e8-USD × e18-HYPE): `q = Q0, cost = Q0 × B0`; add → `q += n, cost += n ×
-price`; remove → if `n > q` → anomaly `basis-negative` (anchor wrong or an unrecorded deposit; basis
-unreliable, calls held), else `cost = cost × (q − n) / q; q −= n` (removal at average leaves the average
+price`; remove → if `n > q` → the basis is unreliable with reason `basis-negative` (anchor wrong or an
+unrecorded deposit) and a warning is emitted, not an anomaly, so calls hold (S4) while puts continue; else `cost = cost × (q − n) / q; q −= n` (removal at average leaves the average
 unchanged). Compare `H_ledger = q` with `H_obs = whype + WHYPE locked in open calls` (only when no
 basis-relevant row is pending): `R = H_obs − H_ledger`; `|R| ≤ tol` → ok; `R > tol` with `absorb` → re-run
 with `Q0' = Q0 + R` (external WHYPE at the anchor price, placed at the anchor so later removals do not
@@ -510,8 +534,8 @@ also require `K ≥ basis × (1 + minStrikeOverBasisPct)`. Rank by `indicativeAp
 then lower `|delta|`. Quote plan per due side, up to `quotesPerSide` (3), diversified: best; best in another
 expiry; best with `|delta| ≤ 0.25`. Strategy requests use `taker = config.account.address` in both modes.
 
-Call fallback (user decision): `basisEligible` = call listings with `K ≥ basis` passing tenor, product,
-moneyness and size (not APR or delta). Non-empty → normal path; none clears the floor →
+Call fallback (user decision): `basisEligible` = call listings with `K ≥ basisE8 × (1 + minStrikeOverBasisPct)`
+passing tenor, product, moneyness and size (not APR or delta). Non-empty → normal path; none clears the floor →
 `hold('apr-floor')`. Empty and `fallback.enabled` → `e*` = shortest expiry with `tte ≥ minHoursToExpiry`,
 `K*` = highest listed call strike at `e*`; optional `customStrikeFirst` requests a custom strike
 `ceil(min(basis, 1.4 S × 0.995))` at `e*` first and takes it if `net6 ≥ minNetPremium6`; optional
@@ -533,10 +557,19 @@ Anti-spam: a key backs off `min(60 min, 5 min × 2^(n−1))` after a below-floor
 > 2 % or its indicative apr rises > 25 %; a due side whose floor is unmet re-plans every `replanSec` (300).
 Token buckets: strategy 12 RFQ/min, sampler 6 RFQ/min, hard cap 20/min.
 
-### 8.8 Dry-run cadence
+### 8.8 Dry-run cadence (see §8.9 for config)
 
-In dry-run, a `would-trade` decision records a simulated deployment in memory so the DCA clock advances
-and the decision log matches live cadence. Simulated deployments are lost on restart.
+In dry-run, after `sellOption` returns `aborted('dry-run')` for the chosen intent, the daemon records a
+simulated deployment in memory so the DCA clock advances and the decision log matches live cadence.
+Simulated deployments are lost on restart.
+
+### 8.9 WheelConfig
+
+`WheelConfig` is the zod output of `config.example.json` (Appendix B) with units normalized at the boundary:
+`*Pct` fields become fractions without the suffix (`minAprPct: 40` → `minApr: 0.4`); `*Usd` and `*Usdc`
+strings become `bigint` 6-dp fields suffixed `6`; `*Whype` and `*Hype` strings become `bigint` e18 fields
+suffixed `E18`; `basisUsd` becomes `basisE8`; `null` becomes `undefined`. Notional amounts
+(`notionalLast24h6`, `maxNotionalPer24h6`) are `bigint` 6 dp: strike × qty for puts, spot × qty for calls.
 
 ## 9. Daemon
 
@@ -626,7 +659,7 @@ for dry-run only; data growth.
 | Socket closes mid-auction | Pending call rejects `socket-closed`; results from the old connection are discarded; reconnect with backoff. |
 | TTL out of bounds; `quote.apy` disagrees with our APR; maker signature does not recover | Not executable; recorded. Two APR disagreements → halt live. |
 | Executable re-quote below `minPriceE18` | `aborted('price-floor')`; allowance stays (harmless, exact, needs our signature). |
-| Gas: exceeds premium; echo mismatch; unknown extra key; fee over bound | Skip and cooldown; **echo mismatch or unknown key halts live**; fee over bound → hold `gas`. |
+| Gas: exceeds premium; echo mismatch; unknown extra key or value; fee over bound | Candidate skipped with key backoff, no side cooldown (nothing was sent); **echo mismatch or unknown key halts live**; fee over bound → hold `gas`. |
 | `confirm` rejected | Never retry the same quote or nonce; 60 s cooldown; three per hour → halt live. |
 | Relayer tx reverts | Collateral unmoved; 60 s cooldown; two per 24 h → halt live. |
 | No confirm reply, socket closed, or receipt timeout | `unknown`: hold the side; resolve by API row or vault counter; after 1800 s log error and unblock; never re-sign meanwhile. |
@@ -703,7 +736,7 @@ export type Listing = { strikeE8: bigint; expirySec: number; isPut: boolean; del
 export type Asset = { symbol: string; address: Address; underlying: Address; decimals: number;
   minTradeSizeE18: bigint; maxTradeSizeE18: bigint; active: boolean; priceE18: bigint;
   strikePrecisionE8: bigint; marketOpen: boolean };
-export type Cap = { name: string; type: 'CONTRACTS' | 'NOTIONAL' | 'GLOBAL'; capE18: bigint; usageE18: bigint };
+export type Cap = { name: string; type: 'CONTRACTS' | 'NOTIONAL'; capE18: bigint; usageE18: bigint };
 export type QuoteRequest = { asset: Address; assetName: string; chainId: 999; expiry: number; isPut: boolean;
   quantity: string; strike: string; taker: Address; usd: Address; collateralAsset: Address; isEIP1271: false };
 export type Quote = { assetAddress: Address; chainId: number; expiry: number; isPut: boolean; isTakerBuy: boolean;
@@ -727,7 +760,7 @@ export type Fill = { txHash: Hex; chainId: number; underlying: Address; symbol: 
 
 // strategy/wheel/types.ts
 export type Snapshot = {
-  nowSec: number; self: Address;
+  nowSec: number; localNowMs: number; mode: 'live' | 'dry-run'; self: Address;
   chain: { blockNumber: bigint; blockTs: number; whypeE18: bigint; usdc6: bigint; usdt06: bigint; nativeHypeE18: bigint;
            allowanceUsdc6: bigint; allowanceWhypeE18: bigint; vaultCounter: bigint; pendingNonceGap: number };
   positions: Position[];                 // strictly parsed, this tick
@@ -746,7 +779,7 @@ export type WheelState = {
   capital: Record<Side, SideCapital>;
   basis: { basisE8: bigint | null; qtyE18: bigint; residualE18: bigint; reliable: boolean; reason?: string };
   lastDeployTs: Partial<Record<Side, number>>;
-  deploymentsLast24h: number; notionalLast24hUsd: number;
+  deploymentsLast24h: number; notionalLast24h6: bigint;
   anomalies: string[]; warnings: string[];
 };
 export type HoldReason = 'disabled' | 'kill-switch' | 'anomaly' | 'api-lag' | 'inconsistent' | 'settlement-pending'
@@ -790,7 +823,7 @@ export type TradeDeps = {
 export type TradeResult =
   | { status: 'filled'; txHash: Hex; approveTxHash?: Hex; quote: Quote; premium6: bigint; gasFee6: bigint }
   | { status: 'reverted'; txHash: Hex; approveTxHash?: Hex }
-  | { status: 'unknown'; reason: 'confirm-timeout' | 'socket-closed' | 'receipt-timeout' | 'shutdown';
+  | { status: 'unknown'; reason: 'confirm-timeout' | 'socket-closed' | 'receipt-timeout' | 'shutdown' | 'bad-result' | 'verify-failed';
       confirmSentAtSec: number; txHash?: Hex; approveTxHash?: Hex }
   | { status: 'aborted'; stage: 'precheck' | 'approve' | 'requote' | 'price-floor' | 'gas' | 'echo' | 'guard'
       | 'confirm-rejected' | 'dry-run'; message: string; checkId?: string; approveTxHash?: Hex; echoOk?: boolean; wouldApprove?: bigint };
