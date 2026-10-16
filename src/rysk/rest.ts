@@ -163,7 +163,7 @@ export class RyskRest {
     } catch (error) {
       if (!signal.aborted) throw error;
       const message = `${init.method} ${url.pathname} timed out after ${this.#timeoutMs} ms`;
-      throw new CallTimeoutError(message, { cause: error });
+      throw new CallTimeoutError(message, true, { cause: error });
     }
   }
 

@@ -166,7 +166,7 @@ describe('RyskRest GET endpoints', () => {
 
     const error = await rest.assets().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(CallTimeoutError);
-    expect(error).toMatchObject({ message: 'GET /api/assets timed out after 50 ms' });
+    expect(error).toMatchObject({ message: 'GET /api/assets timed out after 50 ms', sent: true });
     expect(fetchFn).toHaveBeenCalledOnce();
     expect(fetchFn.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
     expect(sleep).not.toHaveBeenCalled();

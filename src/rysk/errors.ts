@@ -9,19 +9,31 @@ export class RyskRpcError extends Error {
   }
 }
 
-/** The WebSocket closed while a call was pending. */
+/**
+ * The WebSocket closed while a call was pending. `sent`: whether its frame was written to the socket (false
+ * means the server never saw it).
+ */
 export class SocketClosedError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly sent: boolean;
+
+  constructor(message: string, sent: boolean, options?: ErrorOptions) {
     super(message, options);
     this.name = 'SocketClosedError';
+    this.sent = sent;
   }
 }
 
-/** A call (WebSocket or REST attempt) passed its deadline. Never retried blindly. */
+/**
+ * A call (WebSocket or REST attempt) passed its deadline. Never retried blindly. `sent`: whether the request
+ * left the client (false means the server never saw it; REST attempts always count as sent).
+ */
 export class CallTimeoutError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly sent: boolean;
+
+  constructor(message: string, sent: boolean, options?: ErrorOptions) {
     super(message, options);
     this.name = 'CallTimeoutError';
+    this.sent = sent;
   }
 }
 
