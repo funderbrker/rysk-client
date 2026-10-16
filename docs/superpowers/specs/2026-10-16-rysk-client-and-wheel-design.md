@@ -1,7 +1,8 @@
 # Rysk Client and Bidirectional Wheel — Design
 
 Date: 2026-10-16
-Status: approved for implementation (user delegated section approval to reviewer agents)
+Status: Approved for implementation (reviews: strategy ideation, architecture review, protocol spike; the
+user delegated design approval to reviewer agents)
 Protocol reference: `docs/rysk-protocol.md`
 
 ## 1. Goal
@@ -11,428 +12,825 @@ covered calls and cash-secured puts, and read positions and settlement history. 
 strategy: a bidirectional wheel on HYPE/USDC that sells cash-secured puts with idle USDC and covered calls
 with idle WHYPE, chasing a minimum target APR, with the constraint that HYPE is sold at or above its
 weighted-average acquisition price. The same binary doubles as a research tool: in dry-run mode it requests
-real quotes and records them without trading.
+real quotes, exercises the whole trade path up to the signature, and records everything without trading.
 
 ### 1.1 In scope (v1)
 
-- `chain` layer: Foundry keystore decryption, viem clients for HyperEVM, ERC-20 approve/balances.
-- `rysk` layer: REST and WebSocket JSON-RPC clients, typed domain model, unit conversions, EIP-712
-  signing, and the complete seller trade flow with safety checks.
-- `strategy/wheel`: pure state derivation, candidate selection, quote evaluation, DCA allocation.
-- `daemon`: tick loop, dry-run (default) and live modes, wide quote scan for research, append-only JSONL
-  recording, structured logs, small CLI.
-- Docs: protocol reference, this spec, an implementation plan, a README with run instructions.
+- `domain`: pure protocol knowledge: constants, types, unit conversions, inventory and position parsing,
+  cap matching, APR math. No IO.
+- `chain`: Foundry keystore decryption, viem clients for HyperEVM, one batched read per tick, ERC-20 approve.
+- `rysk`: REST client, WebSocket JSON-RPC client, taker methods (`request`, `confirm`), EIP-712 signing.
+- `execution`: the seller trade flow as a guarded state machine with receipt verification.
+- `strategy/wheel`: pure state derivation (positions, capital, basis ledger), gates, candidate planning,
+  quote evaluation, DCA allocation.
+- `daemon`: fixed-delay tick loop, dry-run (default) and live modes, research sampler, append-only JSONL
+  recording, status file, kill switch, single-instance lock, structured logs, small CLI.
+- Docs: protocol reference, this spec, an implementation plan, a README with run and production notes.
 
 ### 1.2 Out of scope (v1)
 
-- Trading with USDT0 or USDH products, or with liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The
-  wide scan records their quotes; the strategy trades only USDC + WHYPE.
-- Wrapping native HYPE to WHYPE. The wallet already holds WHYPE.
-- Persistent database, dashboard, push alerts, multi-wallet, testnet, other underlyings.
-- Early close or rolling (Rysk has no secondary market).
+- Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The research
+  sampler records their quotes; the strategy trades only USDC + WHYPE.
+- Wrapping native HYPE to WHYPE (the wallet already holds WHYPE), early close, other underlyings.
+- Database, dashboard, push alerts, multi-wallet, multi-host, testnet, chains other than 999.
+- The items in §13 Future work.
 
-## 2. Verified protocol facts the design depends on
+## 2. Verified facts the design depends on
 
-Full detail is in `docs/rysk-protocol.md`. The facts that shape this design:
+Provenance tags: **live** (observed on the wire on 2026-10-16), **bundle** (read from the app's
+JavaScript), **docs** (Rysk documentation), **inferred**. Detail in `docs/rysk-protocol.md`.
 
-- Rysk is request-for-quote. The seller is the taker. A `request` on `wss://v12.rysk.finance/taker`
-  returns one best quote after a ~2 s auction. Anyone may request, even with the zero address as taker;
-  the web app does so constantly (about 8 requests/s observed), so quote sampling is ordinary traffic.
-- Selling requires exactly one on-chain transaction from the seller: ERC-20 `approve(MarginPool, amount)`
-  on the collateral token. The trade itself is submitted by Rysk's relayer after the seller signs an
-  EIP-712 `Confirmation` and sends `confirm`. The result is the relayer's transaction hash.
-- A `gasFee` (6-dp USD) is deducted from the premium and is part of the signed message. It is fetched by
-  `POST /api/gas` with the confirmation body, and the response is spread into the `confirm` params.
-- Quotes carry `validUntil`; there is no cancel. JSON-RPC `id` equals the method name.
-- For HYPE on chain 999: underlying asset is WHYPE; calls pay premium in USDC and accept WHYPE, kHYPE,
-  wstHYPE or LHYPE as collateral; puts exist as USDC/USDC and USDT0/USDT0 products. Min size 25 HYPE,
-  max 5000 HYPE per trade, quantities in e18 "contracts" and multiples of the minimum.
-- The inventory publishes strikes, expiries, server-computed indicative `apy` and `delta` per listing,
-  but `bid`/`ask` are zero for HYPE. Real prices only come from quotes.
+- Rysk is request-for-quote; the seller is the taker. A `request` on `wss://v12.rysk.finance/taker` returns
+  one best quote after a ~2 s auction. **live**: three zero-address requests from Node (no `Origin`
+  header) were answered in 2.2–2.4 s with real maker quotes; `validUntil` is unix seconds, with TTLs of
+  45, 66 and 93 s; `nonce` is a decimal string of 13 or 19 digits; `premiumAsset` is `""`; `apy` is a
+  percent. The web app fires such requests for every visitor (about 8/s observed), so sampling is
+  ordinary traffic.
+- Selling requires one on-chain transaction from the seller: ERC-20 `approve(MarginPool, amount)` on the
+  collateral token for the exact amount. The trade is submitted by Rysk's relayer after the seller signs an
+  EIP-712 `Confirmation` and sends `confirm`; the result is the relayer's transaction hash. **live**: in the
+  observed fill the exact allowance was fully consumed and the seller received exactly `quantity × price`;
+  the maker fee was charged to the maker.
+- `POST /api/gas` with the full confirmation body echoes every sent field unchanged (same string forms)
+  plus exactly these extra keys: `fees`, `gasFee`, `isEIP1271`, `isPremium`, `premiumAsset`,
+  `settlementCollateralPayout`, `settlementPayout`, `settlementPayoutAsset`, `signature`, `status`,
+  `txHash`, `vaultId`. **live**: `gasFee` was `"0"` for every probe, including a price of 1 wei; errors
+  for other cases are non-2xx with a text body (**bundle**). The app signs its own body and sends the
+  spread echo (**bundle**).
+- JSON-RPC `id` equals the method name, so replies are matched by method and content, not by a correlation
+  id. There is no cancel. The maker `Quote` struct has no taker field, so a quote is a bearer offer until
+  `validUntil`.
+- For HYPE on chain 999 the RFQ `asset` is always WHYPE; calls pay premium in USDC and accept WHYPE,
+  kHYPE, wstHYPE or LHYPE as collateral; puts exist as USDC/USDC and USDT0/USDT0 products. Minimum size 25,
+  maximum 5000 contracts per trade, e18 quantities in multiples of the minimum. Inventory strikes are
+  delta buckets (about 0.07/0.10/0.22/0.30/0.35/0.40 per side) regenerated as spot moves, over four
+  expiries. Expiries are usually Friday 08:00 UTC but are read from data, never assumed.
+- Rysk's displayed APR is `price / strike × 365 / T` for puts and `price / spot × 365 / T` for calls, `T` in
+  days to expiry. **live**: our formula matched `quote.apy` within 0.1 point on all three spike quotes.
+- The inventory's indicative `apy` understates real quotes by 1.4× to 2.6×, unevenly (**live**, five
+  fills and three quotes). It can rank candidates; it must never be used to apply the APR floor.
+  Inventory `bid`/`ask` are zero for HYPE.
 - `GET /api/user/positions?address=` returns every position, open and settled, with payout fields that
-  identify the settlement outcome exactly (see §6.2). Settlement is automatic, about two hours after the
-  Friday 08:00 UTC expiry. The seller has nothing to do at expiry.
-- The seller receives the full quoted premium. The published fee is charged to the maker.
+  identify the outcome exactly (§6.5). The row's `symbol` is the collateral symbol; the underlying is
+  `address`. Chain-1 rows for the same address are included.
+- An Opyn-Gamma-style vault store at `0x84d84e481b49b8bc5a55f17aaf8181c21a29b212` answers
+  `getAccountVaultCounter(owner)`; for the sampled seller it equals the number of chain-999 rows
+  (**live**). This is chain truth for how many positions exist, independent of the API.
+- The public HyperEVM RPC allows 100 requests/min, has no WebSocket, and rejected one of six sequential
+  calls with "Request exceeds defined limit." (**live**). Multicall3 is deployed and known to viem.
+- Settlement is automatic for the seller, about two hours after expiry. The seller has nothing to do.
 
 ## 3. Architecture
 
-Single TypeScript package, four layers, one-way dependencies, a pure core with an imperative shell:
+Single TypeScript package. Layers with one-way dependencies; a pure core fed by an imperative shell.
 
 ```
-cli ──► daemon ──► strategy/wheel (pure)
-          │  └──► rysk ──► chain
-          └──────► rysk ──► chain
+cli ──► daemon ──► strategy/wheel ──► domain
+          │  └──► execution ──► rysk ──► domain
+          │           └──────► chain (through ports)
+          └──────► rysk, chain (snapshot gathering)
 ```
 
-| Layer | Responsibility | Depends on | Side effects |
+| Layer | Responsibility | May import | Side effects |
 |---|---|---|---|
-| `chain` | Keystore, viem public/wallet clients, ERC-20 reads and approve, receipts | viem | RPC |
-| `rysk` | Protocol constants, domain types, units, REST, WebSocket JSON-RPC, EIP-712, trade flow | `chain` | HTTP, WS, signing |
-| `strategy/wheel` | Derive state, plan candidates, evaluate quotes, allocate tranches | types only | none |
-| `daemon` | Tick loop, snapshot gathering, execution, recording, logging, config | all above | files, stdout |
+| `domain` | Constants, types, units, parsing of inventory/positions/caps, APR math | nothing but viem types | none |
+| `chain` | Keystore, viem clients, multicall snapshot, approve, receipts, vault counter | `domain` | RPC |
+| `rysk` | REST, WebSocket JSON-RPC, taker `request`/`confirm`, EIP-712 | `domain` | HTTP, WS |
+| `execution` | Guarded sell state machine | `domain`, `rysk`, chain **ports** | signing, txs |
+| `strategy/wheel` | State derivation, gates, planning, evaluation | `domain` | none |
+| `daemon` | Loop, snapshot, sampler, recorder, status, lock, config, logging | all | files, stdout |
 | `cli` | Argument parsing, commands | `daemon` | process |
 
-Design rules:
+Rules, enforced in code where possible:
 
-- Everything that decides is a pure function of a `Snapshot` and `WheelConfig`. Everything that talks to
-  the network lives in `rysk`, `chain`, or `daemon` and is injected into the loop through small interfaces,
-  so the loop and the strategy are testable with fakes.
+- `domain` and `strategy` have no IO, no `node:` imports, never read a clock, and are deterministic and
+  invariant to row order and duplicates. `test/architecture.test.ts` globs their sources and fails on any
+  import outside `domain/` or `strategy/`.
 - On-wire integers are `bigint` with the unit in the name (`strikeE8`, `quantityE18`, `priceE18`,
-  `amount6`). Human-facing ratios (APR, fractions) are `number` and are never used for on-chain amounts.
-- No module stores state across ticks except an in-memory post-trade cooldown and the recorder's file
-  handles. All strategy state is derived each tick.
-- No secrets in the repo: keystore directory, config file, and data directory are gitignored. The config
-  example contains placeholders.
+  `amount6`). Timestamps carry their unit (`expirySec`, `nowSec`, `tsMs`). APRs are fractions internally
+  (`0.75`), converted from Rysk's percent at the parse boundary. Decimal strings are converted by string
+  arithmetic, never through floats. Addresses are checksummed at parse time so internal `===` is safe;
+  wire data is compared with `isAddressEqual`.
+- Nothing from a server response can change which token is approved, which contract is the spender, or
+  which domain is signed. These are pinned constants.
+- No strategy state is stored across ticks. In-process memory holds only: the execution lock, per-key RFQ
+  backoff, used quote nonces, per-side cooldown, and dry-run simulated deployments. All of it may be lost
+  on restart; chain evidence and a startup quiet period cover the gap (§7.6).
+- Public repo hygiene: keystore directory, `config.json`, `data/` and `*.password` are gitignored in the
+  first commit; a `check:secrets` script fails on tracked `"ciphertext"` or 64-hex strings outside
+  `test/fixtures/`; fixtures use obviously fake addresses and hashes; the RPC URL is redacted from logs.
+- The official `ryskv12` SDKs are not used: they are maker-side wrappers around a Go binary.
 
 ## 4. Toolchain and repository layout
 
-- Node ≥ 22 (global `WebSocket`, `fetch`), pnpm, TypeScript strict ESM, `tsx` to run, `tsc --noEmit` to
-  typecheck, `vitest` for tests, `biome` for lint and format.
-- Runtime dependencies: `viem` (chain, EIP-712 typed-data signing, ABI, `hyperEvm` chain), `zod` (config
-  and API response validation), `pino` (structured logs), `read` (hidden password prompt).
-- Dev dependencies: `vitest`, `typescript`, `tsx`, `@biomejs/biome`, `ws` (mock WebSocket server for
-  tests), `@types/node`.
+- Node ≥ 22.22 (`.nvmrc`), run as `node src/cli/main.ts` using Node's native type stripping (verified in the
+  sandbox). Consequences: `"type": "module"`, `module`/`moduleResolution: NodeNext`,
+  `verbatimModuleSyntax`, `erasableSyntaxOnly`, `allowImportingTsExtensions` + `noEmit`, `strict`,
+  `noUncheckedIndexedAccess`; relative imports carry `.ts`; no enums, namespaces or parameter properties.
+  `tsc --noEmit` typechecks; `vitest` tests; `biome` lints and formats; pnpm.
+- Runtime dependencies: `viem` (chain, multicall, typed-data sign and recover, `hyperEvm`), `zod` (config
+  and response validation, used only in `daemon` and `rysk`), `pino` (logs), `read` (hidden prompt).
+- Dev dependencies: `typescript`, `vitest`, `@biomejs/biome`, `ws` (mock server), `@types/node`, `pino-pretty`.
+- `src/lib/json.ts` exports `stringifyBig` (bigint → decimal string). The recorder uses it; pino gets a
+  `formatters.log` that maps bigint to string (pino otherwise emits bare numbers that lose precision).
+- `NODE_USE_ENV_PROXY=1` is a sandbox environment setting, never set in code.
 
 ```
 rysk-client/
-  package.json  tsconfig.json  biome.json  vitest.config.ts  .gitignore  README.md
-  config.example.json                 # committed; real config.json is gitignored
-  keystore/                           # gitignored; cast keystore files
-  data/                               # gitignored; JSONL outputs
-  docs/
-    rysk-protocol.md
-    superpowers/specs/…  superpowers/plans/…
+  package.json  tsconfig.json  biome.json  vitest.config.ts  .nvmrc  .gitignore  README.md
+  config.example.json                  # committed; config.json is gitignored
+  keystore/  data/                     # gitignored
+  docs/  rysk-protocol.md  superpowers/specs/…  superpowers/plans/…
   src/
-    chain/      keystore.ts  client.ts  erc20.ts  index.ts
-    rysk/       constants.ts  types.ts  units.ts  rest.ts  socket.ts  taker.ts  eip712.ts  trade.ts  positions.ts  index.ts
-    strategy/wheel/  types.ts  state.ts  basis.ts  candidates.ts  evaluate.ts  allocate.ts  plan.ts  index.ts
-    daemon/     config.ts  snapshot.ts  loop.ts  execute.ts  scan.ts  recorder.ts  logger.ts  index.ts
-    cli/        main.ts  commands/run.ts  commands/state.ts  commands/quote.ts  commands/history.ts
+    lib/        json.ts  time.ts  result.ts
+    domain/     constants.ts  types.ts  units.ts  apr.ts  inventory.ts  positions.ts  caps.ts  index.ts
+    chain/      keystore.ts  clients.ts  snapshot.ts  erc20.ts  receipts.ts  index.ts
+    rysk/       rest.ts  socket.ts  taker.ts  eip712.ts  errors.ts  index.ts
+    execution/  types.ts  checks.ts  echo.ts  body.ts  sell.ts  index.ts
+    strategy/wheel/  config.ts  types.ts  classify.ts  basis.ts  state.ts  gates.ts  tranche.ts  candidates.ts  evaluate.ts  index.ts
+    daemon/     config.ts  snapshot.ts  loop.ts  sampler.ts  recorder.ts  status.ts  lock.ts  logger.ts  version.ts  index.ts
+    cli/        main.ts  run.ts  state.ts  quote.ts  history.ts  wallet.ts  basis.ts
+    **/*.test.ts  (colocated)
   test/
+    architecture.test.ts
     fixtures/   keystore-anvil0.json  positions.json  inventory.json  assets.json  caps.json  history.json
-    …           *.test.ts colocated with sources or under test/
+                receipt.json  ws-request-*.json  gas-*.json  config.example.test.ts
 ```
 
 ## 5. Chain layer
 
 ### 5.1 Keystore
 
-`decryptKeystore(json, password): Hex` implements Web3 Secret Storage v3 for the parameters Foundry writes
-(scrypt, aes-128-ctr) using `node:crypto` (`scryptSync` with a generous `maxmem`, `createDecipheriv`) and
-viem's `keccak256` for the MAC check. It accepts files without an `address` field and hex fields without
-`0x`. `loadAccount(path, password)` returns a viem `PrivateKeyAccount`. The private key never appears in
-logs; the password buffer is not retained.
+`decryptKeystore(json, password): Hex` implements Web3 Secret Storage v3 for Foundry's parameters
+(scrypt, aes-128-ctr) with `node:crypto` (`scryptSync` with a generous `maxmem`, `createDecipheriv`) and
+viem `keccak256` for the MAC. It accepts files without `address` and hex without `0x`.
+`loadAccount(path, password)` returns a viem `PrivateKeyAccount`. The password is not stored after
+decryption; the key is never logged or serialized.
 
-Password resolution order: interactive hidden prompt when stdin is a TTY; otherwise the file named by
-`KEYSTORE_PASSWORD_FILE`; otherwise fail with a clear message. No password in config or argv.
+Password resolution: hidden prompt on stderr when stdin is a TTY (`read`, `silent`); otherwise the file
+named by `KEYSTORE_PASSWORD_FILE`, refused if group- or world-readable; otherwise fail. A
+`KEYSTORE_PASSWORD` environment variable is deliberately unsupported. Only live mode loads the keystore;
+startup asserts the decrypted address equals `config.account.address` and that `getCode(address)` is
+empty (we hard-code `isEIP1271: false`). Startup also warns if `git ls-files keystore` lists anything.
 
-### 5.2 Clients
+### 5.2 Clients and the chain snapshot
 
-`createChainClients({ rpcUrl, chainId, account })` returns a viem public client and wallet client on the
-`hyperEvm` chain definition with a custom RPC URL. Startup asserts the RPC's `eth_chainId` equals the
-configured chain id.
+`createChainClients({ rpcUrl, account? })` returns a viem public client (and wallet client when an
+account is given) on `hyperEvm` with the configured RPC URL; startup asserts `eth_chainId === 999`.
 
-`erc20` helpers: `balanceOf`, `allowance`, `decimals`, and `approve(token, spender, amount)` which sends
-the transaction and waits for the receipt (timeout 120 s). Approvals are for the exact collateral amount,
-matching the web app. Native balance via `getBalance`.
+`readChainSnapshot(client, self)` issues **one** `multicall` returning, at a single block: block number
+and timestamp, native HYPE, WHYPE, USDC and USDT0 balances, `allowance(self, MarginPool)` for USDC and
+WHYPE, and `getAccountVaultCounter(self)` on the vault store; plus `getTransactionCount` for `pending`
+and `latest`. Any failed read fails the snapshot and the tick holds (never decide on partial data). The
+public RPC is flaky; the README recommends a provider URL.
 
-## 6. Rysk layer
+### 5.3 ERC-20 approve
 
-### 6.1 Constants and domain types
+`approve(token, spender, amount): Promise<Hex>` returns the hash; `waitForReceipt(hash, timeoutMs)` is a
+separate call so a timed-out approve still has a recorded hash. Rules: skip if `allowance ≥ amount`;
+refuse if `pendingNonce ≠ latestNonce` (one transaction in flight, far from the 8-nonce mempool limit);
+viem EIP-1559 defaults with a configurable `maxFeePerGasGwei` cap; wait 60 s; after 5 min unmined, one
+replacement at the same nonce with +30 % fees; otherwise `stuck`. Re-read the allowance after mining.
+Never unlimited approvals.
 
-- `ADDRESSES[chainId]`: `rysk`, `marginPool`, `mmarket` for 999 (and 1, 998 for completeness).
-- `TOKENS[999]`: USDC, USDT0, USDH, WHYPE, kHYPE, wstHYPE, LHYPE with decimals and symbols.
-- `Product = { underlying: Address; strikeAsset: Address; collateralAsset: Address; isPut: boolean }`.
-- `Listing = { underlyingSymbol; strikeE8; expiry; isPut; delta; indicativeApy; spot; products: Product[]; timestamp }`,
-  normalized from an inventory combination.
-- `Asset` (from `assets`): symbol, address, underlyingAssetAddress, decimals, minTradeSizeE18,
-  maxTradeSizeE18, active, priceE18.
-- `Cap = { name; type; capE18; usageE18 }`.
-- `QuoteRequest` (taker `request` params) and `Quote` (result) exactly as the protocol reference.
-- `Position`: normalized API row with `bigint` fields plus `settlement: Settlement | null` (§6.2).
-- `Fill`: normalized public history row.
+### 5.4 Receipts
 
-### 6.2 Positions and settlement outcome
+`verifyFillReceipt(receipt, expected)` decodes logs and checks: `status == 1`; `to == Rysk`; an ERC-20
+`Transfer` of the collateral token from `self` to `MarginPool` for exactly `collateralAmount`; a
+`Transfer` of USDC from `MMarket` to `self` for `premium6 − gasFee6` (±1 unit, warn if lower);
+`VaultOpened(owner = self)` from the vault store with `vaultId == counterBefore + 1`; `ShortOtokenMinted`
+amount `== quantityE18 / 10^10`; and no other `Transfer` from `self`. Structure verified on a real fill.
 
-`normalizePosition(row)` converts strings to `bigint` and classifies:
+## 6. Domain and Rysk layers
 
-- `phase`: `open` (status empty, expiry > now), `pendingSettlement` (status empty, expiry ≤ now),
-  `settled` (status `SETTLED`).
-- `settlement.outcome` for settled rows, from payout fields only, never from price comparison:
-  - `payout == 0` → `expiredOtm`, `collateralReturned = settlementCollateralPayout`.
-  - put and `payout > 0` → `assigned`, `receivedUnderlyingE18 = payout` (WHYPE), collateral consumed.
-  - call and `payout > 0` → `exercised`, `receivedStable6 = payout` (strike × qty), collateral delivered.
+### 6.1 Constants
 
-Scale notes: positions API `strike` is e18 (RFQ strike is e8), `quantity`/`price`/`premium` e18,
-stablecoin payouts 6 dp, WHYPE payouts e18.
+`CHAIN_ID = 999`; `ADDRESSES`: `rysk`, `marginPool`, `mmarket`, `vaultStore`, `multicall3`; `TOKENS`:
+USDC, USDT0, USDH, WHYPE, kHYPE, wstHYPE, LHYPE with decimals and symbols; `PRODUCTS`: the traded
+products (`put: USDC/USDC`, `call: USDC/WHYPE`) and the sampled ones. `EIP712_DOMAIN` is pinned.
+Only chain 999 is encoded; a protocol-version tripwire (§9.5) watches for drift.
 
-### 6.3 Units
+### 6.2 Types
 
-`units.ts` holds every conversion so arithmetic is in one place and tested:
+Defined in Appendix A: `Product`, `Listing`, `Asset`, `Cap`, `QuoteRequest`, `Quote`, `ConfirmBody`,
+`Position`, `Settlement`, `Fill`.
 
-- `strikeE8FromNumber`, `strikeE8ToE18`, `strikeE18ToE8`, `formatStrike`.
-- `quantityE18FromHype`, `roundQuantityToIncrement(qE18, minE18, maxE18)`.
-- `collateralForCall(qE18, collateralDecimals)` = `qE18 / 10^(18 − decimals)`.
-- `collateralForPut(qE18, strikeE8)` = `qE18 × strikeE8 × 10^10 / 10^30` (6 dp stable).
-- `premiumE18(qE18, priceE18)` = `qE18 × priceE18 / 10^18`; `premium6 = premiumE18 / 10^12`.
-- `annualizedReturn(premiumUsd, collateralUsd, now, expiry)` = `premium / collateral × 365 d / (expiry − now)`.
-  For puts `collateralUsd = strike × qty`; for calls `collateralUsd = spot × qty`. Net variants subtract
-  `gasFee`. Rysk's own `apy` is recorded alongside for comparison.
+### 6.3 Units and APR
 
-### 6.4 REST client
+All conversions live in `domain/units.ts` and are tested against the real fill (25 WHYPE put @ 78.5 →
+collateral `1962500000`, premium `47486300`, APR 62.83 %) and the spike quotes:
 
-`RyskRest(baseUrl)` with `fetch`, a 15 s timeout, three retries with exponential backoff on network errors
-and 5xx, and zod parsing that validates the fields we use and passes the rest through. Methods: `assets`,
-`inventory`, `caps`, `products`, `userPositions(address)`, `takerHistory(address)`,
-`publicHistory(from, to)`, `expiryPrices(chainId, underlying)`, `gasFee(body)` (POST).
+- `strikeE8FromKey(key)` parses the inventory combination key by string arithmetic (`"86.500000-…"`),
+  asserting it equals `round(strike × 1e8)`; the per-expiry `strikes` arrays are not used (they drop `.5`).
+- `floorToIncrement(qE18, stepE18)` never clamps up (the app's helper does; a 10 HYPE deposit must yield 0).
+- `collateralForCall(qE18, decimals) = qE18 / 10^(18 − decimals)`; `collateralForPut(qE18, strikeE8) = qE18 × strikeE8 / 10^20`.
+- `putQuantityFromUsd(usd6, strikeE8) = usd6 × 10^20 / strikeE8`.
+- `premium6(qE18, priceE18) = qE18 × priceE18 / 10^30` (floor; equals the API's `premium`).
+- `aprFraction(net6, collateral6, nowSec, expirySec) = net6 / collateral6 × 365 × 86400 / (expirySec − nowSec)`,
+  with `collateral6 = qE18 × strikeE8 / 10^20` (put) or `qE18 × spotE8 / 10^20` (call).
+- `minPriceE18ForApr(aprFloor, collateral6, qE18, nowSec, expirySec, gasFee6)`: the price at which the net
+  APR equals the floor; used by execution as an absolute floor (§7.1).
 
-### 6.5 WebSocket JSON-RPC client
+### 6.4 Inventory, assets, caps parsing
 
-`JsonRpcSocket(url)`:
+Per-item parsing: an invalid combination, asset or cap is dropped with a counted warning; the tick does not
+fail. `Listing.products[].collateralAsset` comes from the product entry's `asset`/`collateralAsset`; the RFQ
+asset is the underlying from `assets`. `spotE8` is `assets[WHYPE].price` scaled, and the inventory `index`
+is recorded for display. `remainingCapacityE18(caps, { symbol, asset, isPut }, notionalPriceE8)` returns the
+minimum headroom over `GLOBAL`, the symbol, the asset address and `address-isPut`, pricing puts at strike
+and calls at spot (`domain/caps.ts`, tested on captured caps).
 
-- Connects lazily, reconnects with exponential backoff (1 s × 2ⁿ, cap 30 s, ±25 % jitter).
-- Inactivity watchdog: if no frame for 30 s, close and reconnect. When no call is pending for 15 s it
-  sends `caps` as a heartbeat so the server stays warm.
-- `call(method, params, { timeoutMs })`: because the protocol uses `id === method`, calls are serialized
-  per method (a queue per method name); a reply with `error` rejects with `RyskRpcError(code, message)`;
-  a close while pending rejects with `SocketClosedError`; the caller decides whether to retry.
-- Unsolicited frames are passed to an optional listener and otherwise logged at debug level.
+### 6.5 Positions and settlement
 
-`RyskTaker(socket, rest, chainId)`:
+Positions are parsed **strictly**: any invalid row fails the parse and the tick holds (a dropped row would
+corrupt locked capital and the basis). `parsePosition(row)` converts to `bigint` (asserting e18 strikes are
+exact multiples of 1e10 and `premium` is an exact 6-dp value), checksums addresses, and sets:
 
-- `requestQuote(req, { timeoutMs = 15_000 }): Promise<Quote>`; rejects with `NoQuoteError` on timeout
-  or RPC error; validates that the quote's `strike`, `expiry`, `isPut`, `quantity`, `usd`,
-  `collateralAsset`, `assetAddress`, `chainId` equal the request and that `isTakerBuy` is false and
-  `validUntil` is in the future, otherwise rejects with `QuoteMismatchError`.
-- `positions(address)`, `assets()`, `inventory()`, `caps()` over the socket.
+- `status`: `'open'` (`""`), `'settled'` (`"SETTLED"`), `'unknown'` (anything else, or `isBuy !== true`).
+- `settlement` for settled rows, from payout fields only: `payout == 0 && collateralReturned > 0` →
+  `expiredOtm`; put with `payout > 0 && collateralReturned == 0` → `assigned` (payoutAsset is the
+  underlying, payout equals quantity); call with `payout > 0 && collateralReturned == 0` → `exercised`
+  (payoutAsset equals `usd`, payout equals `quantity × strike / 10^20`); else `anomaly`.
+- Row key for de-duplication: `txHash|isPut|strikeE8|expirySec|collateral|quantityE18`.
 
-### 6.6 EIP-712
+The phase relative to time (`open`, `pendingSettlement`) is computed in the strategy from `nowSec`.
 
-`domain(chainId)` = `{ name: 'rysk', version: '0.0.0', chainId, verifyingContract: ADDRESSES[chainId].rysk }`.
-`CONFIRMATION_TYPES` is the verbatim field list from the app bundle (maker, assetAddress, chainId, expiry,
-isPut, nonce, price, quantity, quoteNonce, quoteSignature, strike, taker, isTakerBuy, usd, collateralAsset,
-collateralAmount, gasFee). `signConfirmation(account, chainId, body)` uses viem `signTypedData`; viem
-already yields `v ∈ {27, 28}`. A unit test signs a fixed body with the Anvil #0 key and recovers the
-address with `verifyTypedData`.
+### 6.6 REST client
 
-### 6.7 Trade flow
+`RyskRest(baseUrl, { fetch, clock })`: 15 s timeout, three retries with exponential backoff on network
+errors and 5xx (never on 4xx), zod parsing. Methods: `assets`, `inventory`, `caps`, `userPositions`,
+`publicHistory(from, to)`, `gasFee(body)` returning `{ ok: true, gasFee6, echoed } | { ok: false, reason:
+'exceeds-premium' | 'http', status, message }` (text matching `/gas fee more than premium/i` maps to
+`exceeds-premium`). Every response's `Date` header updates the measured server skew (§8.3 G5).
 
-`sellOption(deps, intent): Promise<TradeResult>` is the only code path that signs. Steps and invariants:
+### 6.7 WebSocket JSON-RPC client
 
-1. `requestQuote(req)` with `taker = account.address`. Quote validated as in §6.5.
-2. Compute `collateralAmount` from the quote's `quantity` and the product.
-3. If `allowance(collateral, MarginPool) < collateralAmount`, `approve` exactly `collateralAmount` and wait
-   for the receipt. If the approval took longer than `validUntil − 20 s`, re-quote once; if the new quote
-   differs in price by more than `maxRequoteSlippage` (config, default 10 %), abort.
-4. Build the confirmation body: quote fields, `taker`, `collateralAmount`, `isTakerBuy: false`,
-   `nonce = String(Date.now())`, `quoteNonce`, `quoteSignature`, `quoteValidUntil`, `validUntil`.
-5. `POST /api/gas` with the body. The response is **not** trusted blindly: every field we sent must come
-   back equal; only `gasFee` may be added. Otherwise abort with `GasEchoMismatchError`.
-6. Guards before signing: `gasFee6 ≤ premium6 × maxGasFeeFraction` (default 0.2); `validUntil − now ≥ 10 s`;
-   quantity within `[min, max]` and a multiple of min; strike within `[0.5, 2] × spot`; no other confirm in flight.
-7. `signConfirmation`; send `confirm` with `{ ...gasResponse, gasFee, isEIP1271: false, signature }`.
-8. On `result: txHash`: wait for the receipt (timeout 120 s). Then poll `userPositions` until a row with
-   that `txHash` appears (timeout 120 s). Return `{ txHash, quote, premium6, gasFee6, position? }`.
-   On a reverted receipt or missing position, return a `TradeResult` with `status: 'unconfirmed'` so the
-   daemon enters cooldown and logs loudly; the next tick re-derives truth from balances and the API.
+`JsonRpcSocket({ url, createWebSocket, timers, random, logger, connectTimeoutMs = 10_000, idleCloseMs =
+30_000, backoff })` with injectable socket factory and timers so unit tests run on fake timers.
 
-Dry-run executes step 1 only and records the quote.
+- Connect on demand; at most one underlying socket; states `idle → connecting → open → closed`; every
+  handler checks it belongs to the current socket; each connection has an id. Open is declared 500 ms
+  after `onopen`, which also resets the backoff. Reconnect backoff `1 s × 2ⁿ`, cap 30 s, ±25 % jitter. No
+  heartbeat and no watchdog: per-call deadlines detect dead connections, and the socket closes after
+  `idleCloseMs` with nothing pending or queued.
+- `call(method, params, { timeoutMs, accept?, signal? })`: because `id === method`, calls are serialized
+  per method; `timeoutMs` covers queue wait, connect and response, and a queued call whose deadline passes
+  is dropped unsent. A reply whose `result` fails `accept` is logged and ignored, and waiting continues
+  (late replies to a previous request have the same id). `error` → `RyskRpcError(code, message)`; close
+  while pending → `SocketClosedError`; errors with `id: null` are logged. The caller never retries blindly.
 
-## 7. Wheel strategy (pure)
+`RyskTaker(socket, chainId)`:
 
-### 7.1 Inputs
+- `requestQuote(req, { timeoutMs = rfqTimeoutMs (15 000), signal })`: `QuoteOutcome` (Appendix A). `accept` matches
+  `assetAddress`, `chainId`, `expiry`, `isPut`, `quantity`, `strike`, `usd`, `collateralAsset` against the
+  request; a matching frame then must have `isTakerBuy === false` and `nowSec < validUntil ≤ nowSec + 3600`
+  (catches a seconds/milliseconds mix-up), else `mismatch`. One request in flight per socket, 250 ms gap.
+- `confirm(params, { timeoutMs = confirmTimeoutMs (60 000) })`: result must match `^0x[0-9a-f]{64}$`.
+
+### 6.8 EIP-712
+
+`EIP712_DOMAIN = { name: 'rysk', version: '0.0.0', chainId: 999, verifyingContract: ADDRESSES.rysk }`,
+pinned, never read from a server `typeDataDomain`. `CONFIRMATION_TYPES` (17 fields, verbatim from the
+bundle) and `QUOTE_TYPES` (13 fields). `signConfirmation(account, message)` via viem `signTypedData`;
+`recoverQuoteSigner(quote)` via `recoverTypedDataAddress`, recorded on every quote as `makerSigOk` and
+enforced only when `verifyMakerSig: 'enforce'` (default `'warn'`; makers may sign via EIP-1271). Tests:
+sign-and-recover with the key derived from the committed keystore fixture (no raw private key in the
+repo), and signer recovery on captured real quotes.
+
+## 7. Execution
+
+`sellOption(deps, intent): Promise<TradeResult>` (types in Appendix A) is the only code path that
+signs. One instance in flight per process (mutex) and per host (`data/live.lock`, `O_EXCL`, pid,
+stale takeover).
+
+### 7.1 Steps
+
+```
+PRECHECK → APPROVE → REQUOTE → GAS → CHECKS → [dry-run stops here] → SIGN → CONFIRM
+   → RECEIPT → CHAIN_VERIFIED → done (API visibility is observed by the loop, not awaited here)
+exits: aborted(stage) | reverted | unknown
+```
+
+1. **PRECHECK** (C1–C2): fresh snapshot and state, all gates pass, recomputed quantity equals the intent.
+2. **APPROVE**: `collateralAmount` depends only on strike, quantity and decimals, so approve before the
+   executable quote and do not burn its TTL. `approve` + `waitForReceipt`; `stuck` → `aborted('approve')`.
+3. **REQUOTE**: if `quote.validUntil − serverNowSec < minQuoteTtlSec` (15), request one fresh quote for the
+   same request with `taker = self`. Only a quote held at this step is ever signed. If
+   `price < intent.minPriceE18` → `aborted('price-floor')`. No other price tolerance exists.
+4. **GAS**: build our own `ConfirmBody` (§7.3), `gasFee(body)`; `exceeds-premium` or `http` → `aborted('gas')`.
+5. **CHECKS**: the checklist (§7.2). Any failure → `aborted('guard')` with the check id. In dry-run mode
+   the function returns `aborted('dry-run', { echoOk, wouldApprove })` here, having exercised body
+   building, the gas echo and every guard against real data.
+6. **SIGN**: typed-data hash logged; `signConfirmation`. A `trade-intent` record is appended (write-ahead);
+   a failed write aborts.
+7. **CONFIRM**: `signal` checked immediately before sending; the side's cooldown starts **when the message
+   is sent**; `confirm` is sent at most once per signed body and never retried. Timeout 60 s. Reply with
+   `error` → `aborted('confirm-rejected')`; no reply, socket closed or shutdown → `unknown`.
+8. **RECEIPT**: wait 120 s. `status 0` → `reverted` (definitive, collateral unmoved). Success → verify
+   (§5.4); any mismatch → write `data/STOP`, halt live, fatal log. Timeout → `unknown('receipt-timeout')`.
+9. **CHAIN_VERIFIED**: vault counter `== before + 1` and allowance decreased by the amount → `filled`.
+
+### 7.2 Pre-sign checklist
+
+| id | check |
+|---|---|
+| C1 | Live mode, no `data/STOP`, lock held, signer address == `config.account.address`, `isEIP1271 = false`. |
+| C2 | Fresh state (≤ 10 s) passes all gates; recomputed tranche quantity equals the intent. |
+| C3 | Pinned allowlist: `assetAddress` WHYPE; `usd` USDC; `collateralAsset` USDC (put) or WHYPE (call); `chainId 999`; `isTakerBuy false`; `taker == self`. |
+| C4 | Quote echoes the request on every term field (§6.7). |
+| C5 | `maker ∉ {zero, self}`; `quoteNonce` unseen in-process; `recoverQuoteSigner == maker` when `verifyMakerSig: 'enforce'`. |
+| C6 | `minQuoteTtlSec ≤ validUntil − serverNowSec ≤ maxQuoteTtlSec (600)`, and `validUntil < expiry`. |
+| C7 | `price > 0`; `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral` (0.15); our APR (gas 0) within `aprEchoTolerancePp` (1.0 percentage point) of `quote.apy`. |
+| C8 | `price ≥ intent.minPriceE18`; `net6 ≥ minNetPremium6`. |
+| C9 | Gas echo (§7.3): every sent field equal by kind; extra keys ⊆ the known set; `gasFee` a non-negative integer string with `gasFee6 × 10000 ≤ premium6 × maxGasFeeBps` and `gasFee6 ≤ maxGasFeeUsd` (as 6 dp). |
+| C10 | Strike vs fresh spot: put `K ∈ [0.6 S, S (1 − minOtmPct)]`, call `K ∈ [S (1 + minOtmPct), 1.4 S]`; `K % strikePrecision == 0`; `K` listed for that expiry within 5 min unless the intent is a custom fallback strike. |
+| C11 | Expiry in the current inventory and within the tenor window (fallback: ≥ `minHoursToExpiry`). |
+| C12 | `qty % minTradeSize == 0`; `minTradeSize ≤ qty ≤ min(maxTradeSize, maxContractsPerTrade)`. |
+| C13 | `collateralAmount` ≤ free balance − reserve, ≤ current allowance, == approved amount. |
+| C14 | Caps soft check (§8.5). |
+| C15 | Domain pinned; `nonce = String(max(Date.now(), lastNonceMs + 1))`, within 5 s of server time. |
+| C16 | Daily limits including this trade. |
+| C17 | The message is built from a branded `CheckedConfirmBody` that only `checks.ts` can produce. |
+
+### 7.3 Confirm body and gas echo
 
 ```ts
-type Snapshot = {
-  now: number;                   // unix seconds
-  address: Address;
-  balances: { whypeE18: bigint; usdc6: bigint; nativeHypeE18: bigint };
-  positions: Position[];         // every row for the address, open and settled
-  listings: Listing[];           // normalized inventory for HYPE
-  assets: Asset[];
-  caps: Cap[];
-  spotE18: bigint;               // HYPE index price from assets/inventory
+const body: ConfirmBody = {
+  assetAddress: WHYPE, chainId: 999, expiry, isPut, isTakerBuy: false,
+  maker: q.maker, price: q.price, quantity, quoteNonce: q.nonce, quoteSignature: q.signature,
+  quoteValidUntil: q.validUntil, validUntil: q.validUntil,     // both the quote's validUntil (bundle); neither is signed
+  strike, taker: self, usd: USDC, collateralAsset, collateralAmount, nonce,
 };
 ```
 
-`WheelConfig` (validated with zod; defaults in parentheses):
+Echo equality by field kind (`echo.ts`): **address**: both `isAddress` and `isAddressEqual`; **uint**: the
+echo is `/^\d+$/` or a safe integer and `BigInt` equal; **bool**: strict; **hex**: case-insensitive; a missing
+field is a mismatch. Extra keys must be a subset of `GAS_ECHO_EXTRA_KEYS` = {`fees`, `gasFee`, `isEIP1271`,
+`isPremium`, `premiumAsset`, `settlementCollateralPayout`, `settlementPayout`, `settlementPayoutAsset`,
+`signature`, `status`, `txHash`, `vaultId`} (from the spike); any other key aborts in live mode and is
+recorded. `gasFee` missing or `""` means `"0"`.
 
-- `minApr` (0.25) — floor on annualized net premium for both sides.
-- `expiry.minDays` (1), `expiry.maxDays` (14) — window for candidate expiries.
-- `quotesPerTick` (3) — candidates quoted per side per tick, ranked by indicative apy.
-- `allocation.trancheFraction` (0.25) — share of a side's total capital (free + locked + pending) deployed
-  per tranche; `allocation.minIntervalHours` (24) — minimum spacing between deployments on a side.
-- `reserves.usdc6` (0), `reserves.nativeHypeE18` (0.5 HYPE) — untouchable balances; trading halts for
-  both sides if native HYPE is below reserve (no gas for approvals).
-- `basis.openingBasisUsd` (required) — acquisition price applied to WHYPE not attributable to Rysk
-  assignments.
-- `calls.fallback` (true) — when no listed call strike ≥ basis exists, write the highest listed strike at
-  the nearest eligible expiry, ignoring `minApr`.
-- `limits.maxTradesPerDay` (4), `limits.maxNotionalPerTradeUsd` (unbounded), `maxGasFeeFraction` (0.2),
-  `maxRequoteSlippage` (0.1).
-- `products`: fixed in v1 to `{ strikeAsset: USDC, putCollateral: USDC, callCollateral: WHYPE }`.
+**Sign** `toConfirmationMessage(body, gasFee6)` — from our body, never from the echo. **Send**
+`{ ...body, ...echoedExtras, gasFee, isEIP1271: false, signature }` where `echoedExtras` are the
+allowlisted extra keys with their echoed values and `signature` replaced by ours. This carries exactly
+what the app sends while guaranteeing the signed fields are ours. `referralCode` is never sent.
 
-### 7.2 State derivation
+### 7.4 Gas preview
 
-`deriveState(snapshot, config): WheelState`
+Evaluation uses the app's 9-field preview body (`assetAddress, chainId, isPut, collateralAsset, expiry,
+strike, usd, price, quantity`). The full body is used only inside `sellOption`.
 
-1. Keep positions with `chainId === 999` and `underlying === WHYPE`. Positions with other stablecoins
-   still count for the HYPE basis (an assigned USDT0 put also delivered WHYPE) but not for USDC capital.
-2. Classify each position (§6.2). Locked capital: open and pending calls lock `quantity` WHYPE; open and
-   pending puts in USDC lock `strike × quantity` USDC.
-3. HYPE basis by average-cost replay over settled rows ordered by `expiry`:
-   - `totalHype = whypeFree + whypeLockedInCalls`.
-   - `ryskNet = Σ assigned quantity − Σ exercised quantity`.
-   - `external = max(0, totalHype − ryskNet)` carried at `openingBasisUsd`; a negative value means HYPE
-     left the wallet outside Rysk and is logged as a warning.
-   - Replay: start `qty = external, cost = external × openingBasis`; assigned put → `qty += q, cost += q × strike`;
-     exercised call → `cost −= q × (cost / qty); qty −= q`. Result `basis = cost / qty` (undefined when
-     `qty = 0`, in which case no calls are written anyway). Premiums are not netted into the basis.
-4. `lastDeploymentAt[side]` = max `createdAt` over that side's positions (open or settled).
-5. `tradesToday` = count of positions with `createdAt` in the last 24 h.
-6. Output includes per-side `free`, `locked`, `pending`, `total`, plus `basisUsd`, and a `warnings[]` list.
+### 7.5 Cooldown
 
-External WHYPE or USDC deposited later simply raises `free` and, for WHYPE, joins the external lot at the
-configured opening basis. Users who deposit at a materially different price update `openingBasisUsd`.
+| result | cooldown on the side |
+|---|---|
+| `aborted` before confirm | none |
+| `aborted('confirm-rejected')`, `reverted` | 60 s; three confirm errors per hour or two reverts per 24 h → halt live |
+| `filled` | until the txHash appears in the positions API (max `unknownMaxWaitSec`, 1800) |
+| `unknown` | until evidence: a matching row with `createdAt ≥ confirmSentAtSec`, or the vault counter increased (then verify); after `unknownMaxWaitSec` log error and unblock; never re-sign meanwhile |
 
-### 7.3 Planning candidates
+### 7.6 Restart and double deployment
 
-`planSide(side, state, snapshot, config): SidePlan` returns either `{ kind: 'hold', reason }` or
-`{ kind: 'quote', candidates: Candidate[], fallback: boolean }`.
+Evidence at startup is stateless:
 
-Hold reasons, checked in order: `gas-reserve`, `trades-per-day`, `dca-interval`, `below-min-size`,
-`no-listings`, `cap-exhausted`.
+| evidence | interpretation | action |
+|---|---|---|
+| `counter == apiCount999`, allowance 0 | idle, or a confirm accepted just before a crash and not yet mined | live sends nothing for `startupQuietSec` (600) |
+| `counter > apiCount999` | a trade executed; API lagging | gate `api-lag` holds until the API catches up |
+| allowance > 0, counter unchanged | approve done, trade not executed | quiet period; the exact allowance is reusable and spendable only with our signature |
+| `pendingNonce > latestNonce` | our approve is in the mempool | hold `tx-pending` |
 
-Tranche: `deployable = min(free − reserve, max(total × trancheFraction, minTradeValue))`, where
-`minTradeValue` is 25 HYPE (calls) or 25 × lowest candidate strike (puts) so that a small first tranche is
-still tradable. The intent is dollar-cost averaging across ticks, not a split within a tick.
+The DCA interval derives from `createdAt` (1 s after the block in the observed fill) and the in-memory
+last confirm time, so re-deployment is blocked as soon as the API shows the row, and the `api-lag` gate
+blocks it before that. A second live instance on the same host is refused by the lock; two hosts on one
+wallet are unsupported and documented.
 
-Candidate listings: HYPE, `isPut` by side, expiry within `[minDays, maxDays]`, product matching the
-configured stablecoin and collateral. Calls additionally require `strikeE8 ≥ basisE8`. Rank by
-`indicativeApy` descending, then nearer expiry. Take the top `quotesPerTick`.
+## 8. Wheel strategy (pure)
 
-Quantity per candidate: calls `q = roundDown(deployableWhype, 25)`; puts `q = roundDown(deployableUsd /
-strike, 25)`; clamp to `maxTradeSize` and to the remaining cap for the asset and side. Drop candidates
-whose `q < minTradeSize`.
+### 8.1 Inputs
 
-Call fallback: if no call listing has `strike ≥ basis` and `calls.fallback` is on, the single candidate is
-the highest strike at the nearest eligible expiry, flagged `fallback: true`. The decision record states
-that the strike is below basis. If listings above basis exist but none clears `minApr`, the side holds
-with reason `apr-floor` (no fallback: that is not the downturn case the fallback is for).
+`Snapshot` and `WheelConfig` are defined in Appendix A. `nowSec` is the chain block timestamp.
 
-### 7.4 Evaluating quotes
+### 8.2 State derivation
 
-`evaluate(candidatesWithQuotes, snapshot, config): Decision`
+`deriveState(snapshot, config): WheelState`, deterministic and order-invariant:
 
-- For each quote: `premiumE18`, `gasFee6` from a gas preview (one `POST /api/gas` per quote, same body
-  the trade would use minus signature), `aprNet` per §6.3.
-- Choose the highest `aprNet` among quotes with `aprNet ≥ minApr`, `premium6 > gasFee6`,
-  and `gasFee6 ≤ premium6 × maxGasFeeFraction`. For a fallback candidate, skip the `minApr` test only.
-- Result: `{ kind: 'trade', candidate, quote, aprNet, aprRysk }` or `{ kind: 'hold', reason: 'apr-floor' | 'no-quotes' | 'gas' }`.
+1. De-duplicate rows by key (collapse identical keys with a warning). Classify each row:
+   `managedPut` (chain 999, underlying WHYPE, put, usd USDC, collateral USDC), `managedCall` (call, usd
+   USDC, collateral WHYPE), `whypeCallOtherUsd` (call, collateral WHYPE, other stable: locks our WHYPE,
+   affects basis), `whypePutOtherUsd` (put on WHYPE, other stable: delivers WHYPE, affects basis),
+   `hypeForeignCollateral` (kHYPE/LHYPE/wstHYPE collateral), `foreign` (other underlying), `otherChain`.
+   Phase from `nowSec`: `open`, `pendingSettlement` (status open, `expiry ≤ now`), `settled`, `unknown`.
+2. Chain cross-check: `apiCount999 = |rows with chainId 999|` (all underlyings). `counter ==` → `'ok'`;
+   `>` → `'api-lag'`; `<` → `'inconsistent'` (anomaly).
+3. Capital per side:
 
-### 7.5 Why these choices
+   | | put (USDC 6 dp) | call (WHYPE 18 dp) |
+   |---|---|---|
+   | `free` | `max(0, usdc − reserveUsdc)` | `max(0, whype − reserveWhype)` |
+   | `locked` | Σ `qty × strike / 10^20` over `managedPut ∧ open` | Σ `qty` over `(managedCall ∪ whypeCallOtherUsd) ∧ open` |
+   | `pending` | same over `pendingSettlement` | same |
+   | `total` | free + locked + pending | free + locked + pending |
+   | `budget` | `min(total, maxCapitalUsdc ?? ∞)` | `min(total, maxCapitalWhype ?? ∞)` |
 
-- APR on collateral (strike × qty for puts, spot × qty for calls) is the yield on capital actually locked,
-  which is what the user compares across sides.
-- Ranking by indicative apy before quoting bounds RFQs to a few per side per tick, so the strategy's
-  own traffic stays well under the web app's background rate.
-- The DCA interval is derived from position timestamps, so it survives restarts without storage.
+   USDT0 and native HYPE are never capital; USDC locked in `foreign` puts reduces `free` without adding to
+   `total`, so a dedicated wallet or `maxCapitalUsdc` is recommended.
+4. HYPE basis ledger (§8.4).
+5. `lastDeployTs[side]` = max over that side's managed rows' `createdAt`, the in-memory last confirm time,
+   and (dry-run only) simulated deployments.
+6. `deploymentsLast24h` and `notionalLast24hUsd` from managed rows (rolling 24 h, both sides, including
+   manual trades, which errs conservative).
+7. Output `WheelState` (Appendix A) including `anomalies[]` and `warnings[]`.
 
-## 8. Daemon
+### 8.3 Gates
 
-### 8.1 Tick loop
+| id | scope | rule | default |
+|---|---|---|---|
+| G1 | global | no anomalies and no `unknown` rows | |
+| G2 | global | consistency `'ok'` (`api-lag` or `inconsistent` hold) | |
+| G3 | global | no managed or basis-relevant row is `pendingSettlement`, and `settlementGraceSec` (900) has passed since the newest settled expiry | |
+| G4 | global | rows fetched this tick; block age ≤ 30 s; inventory age ≤ 120 s | |
+| G5 | global | `|local − serverNow| ≤ maxClockSkewMs` (3000) (server time from REST `Date` headers and the block timestamp) | |
+| G6 | global | WHYPE asset active, `marketStatus.isOpen !== false`, HYPE listings present | |
+| G7 | live | uptime ≥ `startupQuietSec` (600) | |
+| G8 | global | no execution in flight; `pendingNonce == latestNonce` (`tx-pending`); side not in cooldown | |
+| G9 | live | `nativeHype ≥ minNativeHype` (0.05) | |
+| G10 | global | `data/STOP` absent; `enabled`; frontend version unchanged or `pauseOnFrontendChange` off | |
+| G11 | live | `deploymentsLast24h < maxDeploymentsPer24h` (4); `notionalLast24hUsd < maxNotionalPer24hUsd` (20 000) | |
+| S1 | side | side enabled | |
+| S2 | side | `now − lastDeployTs[side] ≥ minIntervalHours` (24) | |
+| S3 | side | tranche yields ≥ one lot (§8.5) | |
+| S4 | call | basis reliable and defined | |
+| S5 | put | HYPE exposure ≤ `maxHypeExposurePct` when set (off) | |
 
-Every `tickSeconds` (60):
+### 8.4 HYPE basis ledger
 
-1. Gather a `Snapshot` in parallel: balances (RPC), positions (REST), inventory, assets, caps (REST). Any
-   failure skips the tick with a warning; three consecutive failures escalate to error level.
-2. `deriveState`; log a one-line summary (free/locked per side, basis, open positions, warnings).
-3. For the put side then the call side: `planSide` → request quotes for candidates sequentially (each
-   auction ≈ 2 s) → gas previews → `evaluate` → record every quote and the decision.
-4. If `decision.kind === 'trade'`: in live mode call `sellOption` and then re-gather the snapshot before
-   planning the other side; in dry-run log `would-trade` with the full intent. At most one trade per side
-   per tick, one confirm in flight globally.
-5. After any live trade: in-memory cooldown of `cooldownSeconds` (180) on that side, cleared early once
-   the position appears in the API.
+Config `basis: { anchor: { ts, qtyWhype, basisUsd }, externalFlows?: [{ ts, qtyWhype (signed), basisUsd? }],
+residualPolicy: 'absorb' | 'block-calls', residualToleranceWhype }`. `anchor.qtyWhype` is the HYPE owned at
+`anchor.ts`: wallet WHYPE plus WHYPE locked in calls open at that instant; `anchor.ts` must not fall inside
+`[expiry, expiry + 6 h]` of any basis-relevant row. `rysk basis suggest-anchor` prints `{ ts: blockTs,
+qtyWhype: H_obs }` so the user supplies only the price.
 
-Default mode is dry-run. Live trading requires the `--live` flag and `mode: "live"` in config, both.
+Events: settled ITM rows with underlying WHYPE and `expiry > anchor.ts`: assigned puts (`managedPut`,
+`whypePutOtherUsd`) **add** `payout` at `strike`; exercised calls (`managedCall`, `whypeCallOtherUsd`)
+**remove** `quantity`; `externalFlows` add or remove at their price (default anchor price). Order: `ts`
+ascending, adds before removes at equal `ts`, then `createdAt`, then `txHash`.
 
-### 8.2 Wide quote scan (research)
+Replay in exact `bigint` (cost in e8-USD × e18-HYPE): `q = Q0, cost = Q0 × B0`; add → `q += n, cost += n ×
+price`; remove → if `n > q` → anomaly `basis-negative` (anchor wrong or an unrecorded deposit; basis
+unreliable, calls held), else `cost = cost × (q − n) / q; q −= n` (removal at average leaves the average
+unchanged). Compare `H_ledger = q` with `H_obs = whype + WHYPE locked in open calls` (only when no
+basis-relevant row is pending): `R = H_obs − H_ledger`; `|R| ≤ tol` → ok; `R > tol` with `absorb` → re-run
+with `Q0' = Q0 + R` (external WHYPE at the anchor price, placed at the anchor so later removals do not
+re-order it); `R < −tol` with `absorb` → a final removal of `|R|` at the average, warning
+`external-withdrawal`; `block-calls` → unreliable until the user records the flow. `basisE8 = ceil(cost / q)`
+(rounded up: conservative for the ≥ rule), `null` when `q = 0`. Premiums are not netted. Legacy USDT0
+rows that moved WHYPE must be in the ledger (five of the eight exercised calls in the sample wallet were).
 
-With `--scan` (or `scan.enabled` in config), every `scan.intervalSeconds` (300) the daemon requests a quote
-for every HYPE listing across the configured product set (default: puts in USDC and USDT0; calls with
-WHYPE, kHYPE, wstHYPE, LHYPE collateral) at `scan.quantityE18` (25 HYPE) with the zero address as taker,
-sequentially with a 500 ms gap, recording each result (including `NoQuote`). This covers the USDC vs USDT0
-and WHYPE vs LST pricing questions. The scan never trades.
+### 8.5 Tranche sizing
 
-### 8.3 Recorder
+```
+unit(put, K) = K_e8 / 100 (USDC 6 dp per contract);  unit(call) = 10^18
+room   = min(budget − (locked + pending), free)
+target = budget × trancheFraction
+lots   = floor(min(target, room) / (unit × 25))
+if lots == 0 && allowSingleLot && unit × 25 ≤ room → lots = 1     // else the wheel stalls after a 25-lot assignment
+qty    = min(lots × 25, maxTradeSize, maxContractsPerTrade, remainingCapacity rounded down to 25)
+```
 
-Append-only JSONL under `data/`, one file per day per stream; each line has `ts` (ms), `schema` version.
+Caps are a soft pre-check (`usage` semantics are unclear; the server is authoritative): require
+`usage + need ≤ 0.95 × cap` for every matching entry.
 
-- `quotes-YYYYMMDD.jsonl`: `{ source: 'strategy' | 'scan', underlying, isPut, strikeE8, expiry,
-  daysToExpiry, strikeAsset, collateralAsset, quantityE18, taker, requestedAt, respondedAt, latencyMs,
-  ok, maker?, priceE18?, premium6?, validUntil?, aprRysk?, aprGross?, gasFee6?, aprNet?, spotE18,
-  indicativeApy, indicativeDelta, error? }`.
-- `decisions-YYYYMMDD.jsonl`: `{ side, kind, reason?, candidateCount, chosen?, fallback, basisUsd,
-  free, locked, deployable, mode }`.
-- `trades.jsonl`: `{ side, quote, premium6, gasFee6, aprNet, txHash, approveTxHash?, status }`.
-- `state-YYYYMMDD.jsonl`: one derived-state summary per tick.
+### 8.6 Candidates, basis rule, fallback
 
-### 8.4 Logging and lifecycle
+Candidate listings per side: HYPE, `isPut` by side, traded product present, tenor `minHoursToExpiry ≤ tte ≤
+maxDaysToExpiry`, `|delta| ∈ [minAbsDelta, maxAbsDelta]`, moneyness `K ≤ S (1 − minOtmPct)` (put) or
+`K ≥ S (1 + minOtmPct)` (call), quantity ≥ one lot, `indicativeApr ≥ minApr × prefilterRatio` (0.5), where `minApr` is the fraction form of `minAprPct`. Calls
+also require `K ≥ basis × (1 + minStrikeOverBasisPct)`. Rank by `indicativeApr` desc, then shorter tenor,
+then lower `|delta|`. Quote plan per due side, up to `quotesPerSide` (3), diversified: best; best in another
+expiry; best with `|delta| ≤ 0.25`. Strategy requests use `taker = config.account.address` in both modes.
 
-`pino` JSON to stdout (pretty when TTY). Startup prints: mode, chain id check, account address, balances,
-derived state, config summary (never secrets). `SIGINT`/`SIGTERM` finish the current tick without starting
-a new confirm, flush files, exit.
+Call fallback (user decision): `basisEligible` = call listings with `K ≥ basis` passing tenor, product,
+moneyness and size (not APR or delta). Non-empty → normal path; none clears the floor →
+`hold('apr-floor')`. Empty and `fallback.enabled` → `e*` = shortest expiry with `tte ≥ minHoursToExpiry`,
+`K*` = highest listed call strike at `e*`; optional `customStrikeFirst` requests a custom strike
+`ceil(min(basis, 1.4 S × 0.995))` at `e*` first and takes it if `net6 ≥ minNetPremium6`; optional
+`maxDiscountToBasisPct` holds if `K* < basis (1 − d)`. The fallback ignores the APR floor and delta band,
+keeps every other gate and check, and the decision records `lossIfExercisedUsd`. Basis eligibility is
+scoped to the tenor window (`fallback.scope: 'window'`, default) because the strategy tends to short
+duration; `'all-listed'` routes a far-dated strike above basis to the normal path.
 
-### 8.5 CLI
+### 8.7 Evaluating quotes
 
-`rysk run [--live] [--scan] [--config path]`, `rysk state` (derive and print once), `rysk quote --side
-put|call --strike 78.5 --expiry 1793347200 [--qty 25]` (one-off RFQ, no trade), `rysk history --from
---to --out file` (public fills export), `rysk wallet` (address and balances). Implemented with
-`node:util` `parseArgs`.
+For each quote: `premium6`, `net6 = premium6 − gasFee6` (preview), `aprNet`. Choose the maximum
+`aprNet ≥ minApr` (fallback skips the floor) with `net6 ≥ minNetPremium6`; ties: shorter tenor, lower
+`|delta|`, earlier response. The `Decision` carries `minPriceE18` (the price at which `aprNet == minApr`,
+or for a fallback the lowest price passing the gas guards) and `maxGasFee6`. None qualifies →
+`hold('apr-floor')` with the best seen. Live executes at most one intent per tick: the side with the larger
+`aprNet − minApr`.
 
-## 9. Error handling and safety
+Anti-spam: a key backs off `min(60 min, 5 min × 2^(n−1))` after a below-floor quote, reset when spot moves
+> 2 % or its indicative apr rises > 25 %; a due side whose floor is unmet re-plans every `replanSec` (300).
+Token buckets: strategy 12 RFQ/min, sampler 6 RFQ/min, hard cap 20/min.
+
+### 8.8 Dry-run cadence
+
+In dry-run, a `would-trade` decision records a simulated deployment in memory so the DCA clock advances
+and the decision log matches live cadence. Simulated deployments are lost on restart.
+
+## 9. Daemon
+
+### 9.1 Loop
+
+Fixed delay: `while (!signal.aborted) { await tick(); await sleep(tickSeconds, signal) }` (60 s), so a
+multi-minute trade never overlaps a tick. Tick: snapshot (one multicall; REST positions, inventory,
+assets, caps in parallel) → `deriveState` → `STATUS.json` → per due side: plan → serialized
+`requestQuote` + gas preview → `evaluate` → record → live: `sellOption` for at most one intent; dry-run:
+`sellOption` in dry-run mode for the chosen intent (exercises body, echo, guards). Any failed read holds
+the tick; three consecutive failures escalate to error level.
+
+Modes: default dry-run. Live requires `--live` **and** `mode: "live"` in config; `--live` with
+`mode: "dry-run"` exits with an error; `mode: "live"` without `--live` runs dry-run with a warning.
+`--max-trades N` exits after N completed executions for supervised early runs. Dry-run never loads the
+keystore.
+
+### 9.2 Research sampler
+
+A separate loop with its **own** `JsonRpcSocket` (serialization is per connection), sharing only the token
+bucket; fixed-delay scheduling (next sweep starts `intervalSeconds` after the previous one ends);
+`requestTimeoutMs` 6000; paused while a live `sellOption` runs; never trades. Defaults:
+
+- **Hourly sweep**: every listed HYPE combination, both sides, 25 contracts, `taker = zero`, pair legs
+  back-to-back in random order: puts USDC then USDT0; calls WHYPE, kHYPE, LHYPE, wstHYPE.
+- **Pinned series**: up to 4 instruments (default the ~0.10 and ~0.25 delta strikes of the nearest expiry,
+  both sides), every 5 min for their lifetime (as custom strikes once de-listed).
+- **Taker pair**: hourly, one instrument quoted with `taker = self` and `taker = zero` back-to-back.
+- **Inventory snapshot**: HYPE listings and caps every 5 min or on content change.
+- **Public fills**: `publicHistory` hourly, de-duplicated by `txHash`.
+
+### 9.3 Recorder
+
+Append-only JSONL under `data/<stream>/YYYY-MM-DD.jsonl` (UTC days) via `appendFileSync` per line
+(O_APPEND, crash-safe, no handles). Envelope `{ v: 1, kind, tsMs, runId, mode, codeRev, configHash }`;
+every `*E18`, `*E8` and `*6` field is a decimal string. Streams:
+
+- `quotes`: one record per RFQ including failures: purpose (`candidate | exec-requote | sweep | pinned |
+  taker-pair | fallback-custom`), instrument, taker kind, context (spot, inventory ts, indicative apr and
+  delta, tenor, weekday, hour, connection id), request/response times, outcome (`quote | error | timeout |
+  mismatch | socket-closed`), quote fields (maker, priceE18, validUntil, ttl, nonce, server apy,
+  `makerSigOk`), derived premium and APR, and `aprOverIndicative`.
+- `decisions`: per side per tick: gate results, capital, basis, candidates with exclusions and ranks,
+  quotes obtained, floor, result (intent or hold with reason and best seen).
+- `executions`: one record per state-machine step: the gas echo verbatim, every check result, the
+  typed-data hash and nonce, the `trade-intent` write-ahead line, tx hash, receipt summary, visibility latency.
+- `inventory`, `public-fills`.
+
+Settlement history and daily summaries are derived offline from the positions API; no stream is needed.
+Expect roughly 10 MB/day with the sampler on; the daemon never rotates files itself.
+
+### 9.4 Status, kill switch, lock, shutdown
+
+`data/STATUS.json` rewritten each tick: health, hold reasons, halted, last trade, counts. `data/STOP`
+present → no execution (live halts, dry-run continues); fatal events (receipt mismatch, gas-echo mismatch,
+repeated confirm errors, APR echo disagreement twice) write `STOP` and log one `fatal` line. `data/live.lock`
+in live mode. `SIGINT`/`SIGTERM`: abort the loop's signal; `sellOption` checks it right before `confirm`;
+waits after `confirm` may be abandoned and recorded as `unknown`; hard deadline 20 s.
+`unhandledRejection`/`uncaughtException` log fatal and exit 1.
+
+### 9.5 Logging, version tripwire, secrets
+
+`pino` JSON to stdout (pipe through `pino-pretty` in dev). An error serializer redacts the configured RPC
+URL and any `/v2/[A-Za-z0-9_-]{16,}` segment; startup logs the RPC host only, plus mode, chain check,
+address, balances, derived state and a config summary without secrets. `version.ts` fetches
+`https://app.rysk.finance/api/version/` at startup and hourly; on a changed `sha` it warns and, with
+`pauseOnFrontendChange` (default true in live), blocks new confirms until restart.
+
+### 9.6 CLI
+
+`node:util parseArgs` with the subcommand in `positionals[0]`: `run [--live] [--max-trades N] [--config
+path] [--no-sampler]`, `state`, `quote --side put|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral
+whype|khype|lhype|wsthype] [--usd usdc|usdt0]` (one RFQ, no trade), `history --from --to --out`, `wallet`
+(address, balances, allowances, vault counter), `basis suggest-anchor`. Script `"rysk": "node src/cli/main.ts"`.
+
+### 9.7 Running in production
+
+README section: systemd unit with `Restart=on-failure`, `RestartSec=30`, `TimeoutStopSec=30`; password
+file location and permissions; logs to stdout/journald; one live instance per wallet; keep the public RPC
+for dry-run only; data growth.
+
+## 10. Error handling
 
 | Situation | Handling |
 |---|---|
-| No quote within 15 s, or RPC error on `request` | Candidate skipped; recorded as `ok: false`. |
-| Quote fields differ from request | `QuoteMismatchError`; never signed; recorded. |
-| `/api/gas` echo differs from body | Abort trade, error log. |
-| `gasFee` > 20 % of premium, or ≥ premium | Hold with reason `gas`. |
-| WebSocket drops mid-auction | Pending call rejects; candidate skipped; socket reconnects with backoff. |
-| RPC rate limit or outage | Tick skipped; escalate after three in a row. Config should point at a provider RPC. |
-| Approve stuck | 120 s receipt timeout → abort trade, cooldown; at most one approve in flight, so the 8-nonce mempool limit is never approached. |
-| `confirm` returns tx hash but receipt reverts or the position never appears | `unconfirmed` result, cooldown, loud log; next tick re-derives from balances and API. |
-| Restart during the post-trade window | Collateral already left the wallet in the trade tx, so `free` is correct from balances; `lastDeploymentAt` may lag a few seconds; cooldown is re-established if any position is younger than `cooldownSeconds`. |
-| Friday 08:00–10:00 UTC settlement window | Expired positions are `pendingSettlement`: their capital is neither free nor deployable; nothing special to do. |
-| Cap exhausted or size below minimum | Hold with reason. |
-| Rysk halts on oracle divergence | Requests fail or time out; the loop keeps holding. |
-| Clock skew | `nonce` is a millisecond timestamp; startup compares local time with the HTTP `Date` header and refuses to go live if skew > 60 s. |
-| Fallback writes a call below basis | Allowed by config; decision record and log flag it explicitly. |
+| No quote within 15 s; RPC error; late or mismatched reply | Recorded with its outcome; candidate skipped; key backoff. Cap or "cannot quote" errors → hold with reason; text suggesting geo or forbidden → halt live, continue dry-run. |
+| Socket closes mid-auction | Pending call rejects `socket-closed`; results from the old connection are discarded; reconnect with backoff. |
+| TTL out of bounds; `quote.apy` disagrees with our APR; maker signature does not recover | Not executable; recorded. Two APR disagreements → halt live. |
+| Executable re-quote below `minPriceE18` | `aborted('price-floor')`; allowance stays (harmless, exact, needs our signature). |
+| Gas: exceeds premium; echo mismatch; unknown extra key; fee over bound | Skip and cooldown; **echo mismatch or unknown key halts live**; fee over bound → hold `gas`. |
+| `confirm` rejected | Never retry the same quote or nonce; 60 s cooldown; three per hour → halt live. |
+| Relayer tx reverts | Collateral unmoved; 60 s cooldown; two per 24 h → halt live. |
+| No confirm reply, socket closed, or receipt timeout | `unknown`: hold the side; resolve by API row or vault counter; after 1800 s log error and unblock; never re-sign meanwhile. |
+| Receipt amounts differ | Fatal: `STOP`, halt live. |
+| Approve stuck | ≤ 1 pending tx; one replacement after 5 min at +30 %; then halt live; `tx-pending` gate meanwhile. |
+| RPC rate limit, sporadic rejects, stale block | One multicall per tick; any failed read holds; block age > 30 s holds. |
+| Expiry settlement window and overdue settlement (> 6 h) | G3 holds both sides (+ 15 min grace); overdue logs hourly errors. |
+| Positions API outage or partial list; invalid row; unknown status | Strict parse fails → hold; counter mismatch → `api-lag`/`inconsistent`; unknown status → G1 holds. |
+| Revised settlement on a settled row | Re-derivation absorbs it; logged; calls held one tick. |
+| External WHYPE deposit, withdrawal, wrap or unwrap | Residual policy (§8.4); `externalFlows` recommended. |
+| Anchor misconfigured | `basis-negative` → calls held; puts continue. |
+| Spot moves between plan and sign | C10 fails → abort; re-plan next tick. |
+| Frontend version changed | Warn; pause new confirms when configured. |
+| Native gas below reserve; wrong password; address mismatch | Live refused; dry-run allowed. Never auto-unwrap WHYPE. |
+| Fallback writes a call below basis while a put is open | Allowed (neutral stance); `lossIfExercisedUsd` recorded. |
+| Payout in an unexpected asset | Anomaly → hold all. |
 
-Invariants enforced in code, not by convention: a confirm is signed only after echo equality, guard checks
-and quote validation all pass; only one confirm in flight; default mode is dry-run; live needs flag and config.
+## 11. Testing
 
-## 10. Testing
+- Colocated `vitest` unit tests: units against the real fill and spike quotes; keystore against the
+  committed Foundry fixture (public Anvil #0 key, derived in-test for EIP-712 tests); EIP-712 sign/recover
+  for `Confirmation` and `Quote`, plus maker recovery on captured quotes; inventory parsing (key-string
+  strikes, dropped invalid items); position parsing and settlement classification on anonymized rows
+  (fake addresses and hashes); basis replay (adds, removes, residual both signs, negative anomaly, ordering
+  ties) with hand-computed numbers; state derivation invariant under permutation and duplication; gates;
+  tranche (single-lot rule, caps, sizes, `floorToIncrement` 10 → 0); candidates (basis rule, fallback window
+  vs all-listed, custom strike); evaluation (floor, ties, gas bounds, `minPriceE18`); `JsonRpcSocket` on a
+  fake socket with fake timers (serialization, late-reply ignore, deadlines, connect timeout, backoff
+  reset, idle close) plus one real `ws` integration test; `echo.ts` on captured gas responses; `sellOption`
+  against fakes (happy path, each check failing, requote floor, echo mismatch, reverted, unknown, dry-run
+  stop); receipt verification on the anonymized real receipt; recorder and `stringifyBig`; config example
+  parses; architecture test.
+- Live smoke tests, opt-in with `RYSK_LIVE_TESTS=1`: REST and WS reads parse; one zero-address `request`
+  and one gas preview. Never `confirm`.
+- Acceptance before handover: `pnpm typecheck`, `pnpm lint`, `pnpm test`, `pnpm check:secrets` green;
+  `rysk run` in dry-run on mainnet for several ticks from the sandbox produces quote, decision and
+  execution records with `echoOk: true`; `rysk quote` returns a real quote.
 
-- Unit tests with `vitest` for: units (all conversions, with the real fill `25 WHYPE put @ 78.5 →
-  1962.5 USDC collateral, 47.4863 USDC premium` as a worked example); keystore decryption against a
-  committed Foundry keystore of the public Anvil #0 key; EIP-712 sign and recover; position normalization
-  and settlement classification against anonymized real rows; basis replay (assigned, exercised, external,
-  negative external); candidate planning (basis rule, fallback, DCA interval, tranche sizing, min/max,
-  caps); evaluation (APR floor, gas guards); `JsonRpcSocket` against a local `ws` server (id-equals-method
-  serialization, timeout, reconnect, watchdog); `sellOption` against a fake taker, fake REST and fake chain
-  (happy path, echo mismatch, stale quote re-quote, gas guard, unconfirmed); recorder output.
-- Live smoke tests, opt-in with `RYSK_LIVE_TESTS=1`: REST and WS read endpoints parse; one zero-address
-  `request` returns a valid quote or `NoQuote`. Never `confirm`.
-- Acceptance before handover: `pnpm typecheck`, `pnpm lint`, `pnpm test` green; `rysk run` in dry-run
-  against mainnet for several ticks from the sandbox produces quote and decision records.
+## 12. Open questions settled by the first supervised live trade
 
-## 11. Milestones
+1. Whether `confirm` accepts our body plus the allowlisted extras (the app sends the spread echo).
+2. Semantics of `validUntil` vs `quoteValidUntil`; whether the relayer enforces `validUntil`.
+3. Whether concurrent RFQs on one socket are allowed or last-wins; whether makers price `taker = self`
+   differently from zero; whether the server validates `nonce` recency; cap `usage` semantics;
+   settlement-lag distribution; what `0x577b…` is versus the vault store.
 
-1. Scaffold, toolchain, config schema, keystore and chain layer.
-2. Rysk constants, types, units, REST client, positions normalization.
-3. WebSocket client, taker client, EIP-712, trade flow with fakes.
-4. Wheel strategy modules.
-5. Daemon loop, dry-run, scan, recorder, CLI.
-6. Docs, live dry-run validation, review and handover.
+## 13. Future work (deliberately deferred)
+
+Provisional positions from vault views during API lag; FIFO lots report with underwater quantity;
+code-hash pinning of Rysk contracts; per-expiry laddering limits; burst sampling; calibration table from
+indicative to realized APR; `premiumAdjust` basis mode; maker allowlist; halting on foreign-collateral
+positions; secondary RPC; on-chain `Transfer` scan for recent deployments; settlement and daily-summary
+streams; LST collateral and USDT0 trading; wrapping; alerts.
+
+## 14. Milestones
+
+1. Scaffold (toolchain, gitignore first, secrets check), `lib`, `domain` (constants, types, units, APR,
+   parsing, caps) with fixtures from captures.
+2. `chain` (keystore, clients, multicall snapshot, approve, receipts) and `rysk` REST.
+3. `rysk` socket, taker, EIP-712 (fake-timer tests + one `ws` integration test).
+4. `execution` state machine with checks, echo and receipt verification against fakes.
+5. `strategy/wheel`.
+6. `daemon` (loop, sampler, recorder, status, lock, version tripwire, config) and `cli`.
+7. README and production notes, live dry-run validation from the sandbox, review, handover.
+
+## Appendix A: core types
+
+```ts
+// domain/types.ts
+export type Side = 'put' | 'call';
+export type Product = { underlying: Address; strikeAsset: Address; collateralAsset: Address; isPut: boolean };
+export type Listing = { strikeE8: bigint; expirySec: number; isPut: boolean; delta: number;
+  indicativeApr: number /* fraction */; indexUsd: number; products: Product[]; observedAtSec: number };
+export type Asset = { symbol: string; address: Address; underlying: Address; decimals: number;
+  minTradeSizeE18: bigint; maxTradeSizeE18: bigint; active: boolean; priceE18: bigint;
+  strikePrecisionE8: bigint; marketOpen: boolean };
+export type Cap = { name: string; type: 'CONTRACTS' | 'NOTIONAL' | 'GLOBAL'; capE18: bigint; usageE18: bigint };
+export type QuoteRequest = { asset: Address; assetName: string; chainId: 999; expiry: number; isPut: boolean;
+  quantity: string; strike: string; taker: Address; usd: Address; collateralAsset: Address; isEIP1271: false };
+export type Quote = { assetAddress: Address; chainId: number; expiry: number; isPut: boolean; isTakerBuy: boolean;
+  quantity: string; strike: string; maker: Address; nonce: string; price: string; validUntil: number;
+  signature: Hex; usd: Address; collateralAsset: Address; apy: number };
+export type ConfirmBody = { assetAddress: Address; chainId: 999; expiry: number; isPut: boolean; isTakerBuy: false;
+  maker: Address; price: string; quantity: string; quoteNonce: string; quoteSignature: Hex;
+  quoteValidUntil: number; validUntil: number; strike: string; taker: Address; usd: Address;
+  collateralAsset: Address; collateralAmount: string; nonce: string };
+export type Settlement =
+  | { outcome: 'expiredOtm'; collateralReturned: bigint }
+  | { outcome: 'assigned'; receivedUnderlyingE18: bigint }
+  | { outcome: 'exercised'; receivedStable6: bigint }
+  | { outcome: 'anomaly'; detail: string };
+export type Position = { key: string; underlying: Address; chainId: number; isPut: boolean; strikeE8: bigint;
+  quantityE18: bigint; priceE18: bigint; premium6: bigint; usd: Address; collateral: Address; collateralSymbol: string;
+  createdAtSec: number; expirySec: number; txHash: Hex; status: 'open' | 'settled' | 'unknown'; settlement: Settlement | null };
+export type Fill = { txHash: Hex; chainId: number; underlying: Address; symbol: string; isPut: boolean; strikeE8: bigint;
+  expirySec: number; quantityE18: bigint; priceE18: bigint; premium6: bigint; aprRysk: number; usd: Address;
+  collateral: Address; makerFee6: bigint; createdAtSec: number };
+
+// strategy/wheel/types.ts
+export type Snapshot = {
+  nowSec: number; self: Address;
+  chain: { blockNumber: bigint; blockTs: number; whypeE18: bigint; usdc6: bigint; usdt06: bigint; nativeHypeE18: bigint;
+           allowanceUsdc6: bigint; allowanceWhypeE18: bigint; vaultCounter: bigint; pendingNonceGap: number };
+  positions: Position[];                 // strictly parsed, this tick
+  market: { assets: Asset[]; listings: Listing[]; caps: Cap[]; spotE8: bigint; inventoryTs: number };
+  memo: { lastConfirmSec: Partial<Record<Side, number>>; cooldownUntilSec: Partial<Record<Side, number>>;
+          simulatedDeploySec: Partial<Record<Side, number>>; inFlight: boolean; uptimeSec: number;
+          serverSkewMs: number; frontendChanged: boolean; stopFile: boolean };
+};
+export type RowClass = 'managedPut' | 'managedCall' | 'whypeCallOtherUsd' | 'whypePutOtherUsd'
+  | 'hypeForeignCollateral' | 'foreign' | 'otherChain';
+export type Phase = 'open' | 'pendingSettlement' | 'settled' | 'unknown';
+export type SideCapital = { free: bigint; locked: bigint; pending: bigint; total: bigint; budget: bigint };
+export type WheelState = {
+  consistency: 'ok' | 'api-lag' | 'inconsistent';
+  rows: { position: Position; cls: RowClass; phase: Phase }[];
+  capital: Record<Side, SideCapital>;
+  basis: { basisE8: bigint | null; qtyE18: bigint; residualE18: bigint; reliable: boolean; reason?: string };
+  lastDeployTs: Partial<Record<Side, number>>;
+  deploymentsLast24h: number; notionalLast24hUsd: number;
+  anomalies: string[]; warnings: string[];
+};
+export type HoldReason = 'disabled' | 'kill-switch' | 'anomaly' | 'api-lag' | 'inconsistent' | 'settlement-pending'
+  | 'stale-data' | 'clock-skew' | 'market-closed' | 'frontend-changed' | 'quiet-period' | 'in-flight' | 'tx-pending'
+  | 'cooldown' | 'gas-reserve' | 'daily-limit' | 'interval' | 'below-min-lot' | 'cap' | 'basis-unreliable'
+  | 'exposure-cap' | 'no-candidates' | 'no-quotes' | 'apr-floor' | 'fallback-too-far-below-basis' | 'gas';
+export type Candidate = { side: Side; listing: Listing | null /* null for a custom strike */; product: Product;
+  strikeE8: bigint; expirySec: number; quantityE18: bigint; collateralAmount: bigint; request: QuoteRequest;
+  mode: 'normal' | 'basis-fallback' | 'basis-fallback-custom'; rank: number };
+export type SidePlan = { kind: 'hold'; side: Side; reason: HoldReason; detail?: string }
+  | { kind: 'quote'; side: Side; candidates: Candidate[] };
+export type QuoteOutcome =
+  | { ok: true; quote: Quote; requestedAtMs: number; respondedAtMs: number; makerSigOk: boolean | null;
+      gas: { ok: true; gasFee6: bigint } | { ok: false; reason: 'exceeds-premium' | 'http' } }
+  | { ok: false; error: 'timeout' | 'rpc-error' | 'mismatch' | 'socket-closed'; message: string; requestedAtMs: number };
+export type QuotedCandidate = { candidate: Candidate; outcome: QuoteOutcome };
+export type Decision =
+  | { kind: 'trade'; candidate: Candidate; quote: Quote; gasFee6: bigint; aprNet: number; aprRysk: number;
+      minPriceE18: bigint; maxGasFee6: bigint; lossIfExercisedUsd?: number }
+  | { kind: 'hold'; side: Side; reason: HoldReason; best?: { candidate: Candidate; aprNet: number } };
+
+deriveState(s: Snapshot, c: WheelConfig): WheelState;
+checkGates(side: Side, st: WheelState, s: Snapshot, c: WheelConfig): HoldReason | null;
+planSide(side: Side, st: WheelState, s: Snapshot, c: WheelConfig): SidePlan;
+evaluate(side: Side, qs: QuotedCandidate[], st: WheelState, s: Snapshot, c: WheelConfig): Decision;
+
+// execution/types.ts
+export type TradeIntent = { side: Side; candidate: Candidate; quote: Quote; minPriceE18: bigint; maxGasFee6: bigint };
+export type TradeDeps = {
+  mode: 'live' | 'dry-run'; signal: AbortSignal;
+  freshState(): Promise<{ snapshot: Snapshot; state: WheelState }>;
+  quotes: { requestQuote(r: QuoteRequest, o: { timeoutMs: number; signal?: AbortSignal }): Promise<QuoteOutcome> };
+  rest: { gasFee(body: ConfirmBody): Promise<GasResult> };
+  rpc: { confirm(p: ConfirmParams, o: { timeoutMs: number }): Promise<Hex> };
+  collateral: { allowance(token: Address): Promise<bigint>; approve(token: Address, amount: bigint): Promise<Hex>;
+                waitForReceipt(hash: Hex, timeoutMs: number): Promise<TransactionReceipt>; vaultCounter(): Promise<bigint> };
+  signer: { address: Address; signConfirmation(m: ConfirmationMessage): Promise<Hex> } | null;  // null in dry-run
+  clock: { serverNowSec(): number; nowMs(): number };
+  record(e: ExecutionEvent): void;      // write-ahead before confirm; a failed write aborts
+};
+export type TradeResult =
+  | { status: 'filled'; txHash: Hex; approveTxHash?: Hex; quote: Quote; premium6: bigint; gasFee6: bigint }
+  | { status: 'reverted'; txHash: Hex; approveTxHash?: Hex }
+  | { status: 'unknown'; reason: 'confirm-timeout' | 'socket-closed' | 'receipt-timeout' | 'shutdown';
+      confirmSentAtSec: number; txHash?: Hex; approveTxHash?: Hex }
+  | { status: 'aborted'; stage: 'precheck' | 'approve' | 'requote' | 'price-floor' | 'gas' | 'echo' | 'guard'
+      | 'confirm-rejected' | 'dry-run'; message: string; checkId?: string; approveTxHash?: Hex; echoOk?: boolean; wouldApprove?: bigint };
+```
+
+## Appendix B: `config.example.json`
+
+```json
+{
+  "mode": "dry-run",
+  "enabled": true,
+  "account": { "address": "0x0000000000000000000000000000000000000000", "keystorePath": "keystore/wheel" },
+  "rpcUrl": "https://rpc.hyperliquid.xyz/evm",
+  "rysk": { "restUrl": "https://v12.rysk.finance", "wsUrl": "wss://v12.rysk.finance/taker", "appUrl": "https://app.rysk.finance" },
+  "tickSeconds": 60,
+  "dataDir": "data",
+  "logLevel": "info",
+  "put":  { "enabled": true, "minAprPct": 40, "minHoursToExpiry": 36, "maxDaysToExpiry": 16, "minAbsDelta": 0.05,
+            "maxAbsDelta": 0.45, "minOtmPct": 1, "minIntervalHours": 24, "trancheFraction": 0.25,
+            "maxContractsPerTrade": 25, "reserveUsdc": "0", "maxCapitalUsdc": null },
+  "call": { "enabled": true, "minAprPct": 40, "minHoursToExpiry": 36, "maxDaysToExpiry": 16, "minAbsDelta": 0.05,
+            "maxAbsDelta": 0.45, "minOtmPct": 1, "minIntervalHours": 24, "trancheFraction": 0.25,
+            "maxContractsPerTrade": 25, "reserveWhype": "0", "maxCapitalWhype": null, "minStrikeOverBasisPct": 0,
+            "fallback": { "enabled": true, "scope": "window", "customStrikeFirst": false, "maxDiscountToBasisPct": null, "minNetPremiumUsd": "1" } },
+  "tranche": { "allowSingleLot": true },
+  "basis": { "anchor": { "ts": 0, "qtyWhype": "0", "basisUsd": "0" }, "externalFlows": [],
+             "residualPolicy": "absorb", "residualToleranceWhype": "0.000001" },
+  "quoting": { "quotesPerSide": 3, "rfqTimeoutMs": 15000, "replanSec": 300, "prefilterRatio": 0.5,
+               "strategyRfqPerMin": 12, "samplerRfqPerMin": 6 },
+  "safety": { "maxGasFeeUsd": "0.5", "maxGasFeeBps": 200, "minNetPremiumUsd": "1", "minQuoteTtlSec": 15, "maxQuoteTtlSec": 600,
+              "maxPremiumFractionOfCollateral": 0.15, "aprEchoTolerancePp": 1.0, "verifyMakerSig": "warn",
+              "maxClockSkewMs": 3000, "startupQuietSec": 600, "settlementGraceSec": 900, "settlementOverdueHours": 6,
+              "maxDeploymentsPer24h": 4, "maxNotionalPer24hUsd": "20000", "minNativeHype": "0.05",
+              "maxFeePerGasGwei": 5, "confirmTimeoutMs": 60000, "unknownMaxWaitSec": 1800,
+              "maxHypeExposurePct": null, "pauseOnFrontendChange": true },
+  "sampler": { "enabled": true, "sweepEveryMin": 60, "pinned": 4, "pinnedEveryMin": 5, "takerPairEveryMin": 60,
+               "inventoryEveryMin": 5, "publicFillsEveryMin": 60, "requestTimeoutMs": 6000,
+               "putStables": ["usdc", "usdt0"], "callCollaterals": ["whype", "khype", "lhype", "wsthype"] }
+}
+```
+
+Human units are decimal strings converted with `parseUnits` in the zod transform; `null` means unbounded;
+percent fields are named `*Pct` and converted to fractions at the boundary.
