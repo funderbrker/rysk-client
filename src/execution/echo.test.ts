@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { ConfirmBody } from '../domain/index.ts';
-import { echoMismatches, parseGasFee } from './echo.ts';
+import { echoMismatches } from './echo.ts';
 
 const capture = JSON.parse(
   readFileSync(new URL('../../test/fixtures/spike-capture.json', import.meta.url), 'utf8'),
@@ -87,20 +87,5 @@ describe('echoMismatches', () => {
     expect(echoMismatches(sent, { ...echo(), gasFee: '1234', signature: '0x01', isEIP1271: true })).toEqual(
       [],
     );
-  });
-});
-
-describe('parseGasFee', () => {
-  it('reads a decimal uint string, with an empty or missing fee as zero', () => {
-    expect(parseGasFee({ gasFee: '0' })).toBe(0n);
-    expect(parseGasFee({ gasFee: '1234' })).toBe(1234n);
-    expect(parseGasFee({ gasFee: '' })).toBe(0n);
-    expect(parseGasFee({})).toBe(0n);
-  });
-
-  it('returns null for any other fee', () => {
-    expect(parseGasFee({ gasFee: '1.5' })).toBeNull();
-    expect(parseGasFee({ gasFee: 12 })).toBeNull();
-    expect(parseGasFee({ gasFee: null })).toBeNull();
   });
 });

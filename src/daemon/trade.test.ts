@@ -13,9 +13,15 @@ import { CAP_SOFT_MARGIN_BPS, remainingCapacityE18 } from '../domain/caps.ts';
 import { TRADED_PRODUCTS } from '../domain/constants.ts';
 import { hypeAsset } from '../domain/inventory.ts';
 import type { Listing, Side } from '../domain/types.ts';
-import { checkGates, deriveState, fallbackStrike, trancheQuantityE18 } from '../strategy/wheel/index.ts';
+import {
+  ALL_LISTED_MAX_TENOR_DAYS,
+  checkGates,
+  deriveState,
+  fallbackStrike,
+  trancheQuantityE18,
+} from '../strategy/wheel/index.ts';
 import type { Snapshot } from '../strategy/wheel/types.ts';
-import { ALL_LISTED_MAX_TENOR_DAYS, executionConfig, freshStateOf } from './trade.ts';
+import { executionConfig, freshStateOf } from './trade.ts';
 
 const E18 = 10n ** 18n;
 const DAY_SEC = 86_400;

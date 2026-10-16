@@ -137,6 +137,14 @@ describe('RyskRest GET endpoints', () => {
     expect(sleep).not.toHaveBeenCalled();
   });
 
+  it('keeps at most 300 characters of an error body in the message', async () => {
+    const body = `<html>${'x'.repeat(1_000)}</html>`;
+    const { rest } = client(fakeFetch({ status: 404, body }));
+
+    const error = await rest.caps().catch((e: unknown) => e);
+    expect(error).toMatchObject({ status: 404, message: `${body.slice(0, 300)}… (${body.length} chars)` });
+  });
+
   it('throws RestError when a 2xx body is not JSON', async () => {
     const fetchFn = fakeFetch({ status: 200, body: '<html>maintenance</html>' });
     const { rest } = client(fetchFn);
@@ -217,6 +225,18 @@ describe('RyskRest.gasFee', () => {
       message: 'gas fee more than premium',
     });
     expect(fetchFn).toHaveBeenCalledOnce();
+  });
+
+  it('tells exceeds-premium from the whole body but keeps at most 300 characters of it', async () => {
+    const body = `${'detail '.repeat(100)}gas fee more than premium`;
+    const { rest } = client(fakeFetch({ status: 400, body }));
+
+    await expect(rest.gasFee(capture.gas.full.sent)).resolves.toEqual({
+      ok: false,
+      reason: 'exceeds-premium',
+      status: 400,
+      message: `${body.slice(0, 300)}… (${body.length} chars)`,
+    });
   });
 
   it('maps any other 4xx to http without retrying', async () => {

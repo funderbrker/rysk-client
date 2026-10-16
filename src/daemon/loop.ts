@@ -39,8 +39,11 @@ export type LoopDeps = {
   snapshot(): Promise<Snapshot>;
   /** One RFQ with its gas preview and maker-signature check; called serially, never concurrently. */
   quote(c: Candidate): Promise<QuoteOutcome>;
-  /** `sellOption` in the run's mode. */
-  execute(i: TradeIntent): Promise<TradeResult>;
+  /**
+   * `sellOption` in the run's mode. `onExecId` gets the execution's id (its `executions` records' `execId`) as soon as
+   * its first record is written, so the loop's `result` record can carry it.
+   */
+  execute(i: TradeIntent, onExecId?: (execId: string) => void): Promise<TradeResult>;
   /** Read just before `execute`: an `unknown` result's evidence is a counter above it. */
   vaultCounter(): Promise<bigint>;
   recorder: Pick<Recorder, 'append'>;
@@ -50,6 +53,8 @@ export type LoopDeps = {
   stopFile(): boolean;
   /** The frontend version tripwire (gate G10). */
   frontendChanged(): boolean;
+  /** The tripwire's latest frontend `sha`; `null` while no version check has succeeded (the tripwire is inactive). */
+  frontendSha(): string | null;
   /** Writes `data/STOP` with the reason (a fatal event). */
   writeStop(reason: string): void;
   clock: Clock;
@@ -66,8 +71,12 @@ type Trade = Extract<Decision, { kind: 'trade' }>;
 type Run = {
   tick: number;
   consecutiveFailures: number;
-  /** Completed executions, for `--max-trades`: `filled` in live, `aborted('dry-run')` in dry-run. */
+  /**
+   * Completed executions, for `--max-trades`: in live every result whose confirm was sent (`filled`, `unknown`,
+   * `reverted`, `aborted('confirm-rejected')`), in dry-run every `aborted('dry-run')`.
+   */
   completed: number;
+  /** Chain seconds at the end of the last completed execution. */
   lastTradeAtSec: number | null;
   /** The `apr-floor` hold a side repeats while it waits for `replanDueSec`. */
   lastHold: Partial<Record<Side, Hold>>;
@@ -82,6 +91,10 @@ const ESCALATE_AT_FAILURE = 3;
 /** RFQ error text suggesting a geo or access block (spec §10). */
 const GEO_BLOCKED = /geo|forbidden|restricted/i;
 const HOUR_SEC = 3_600;
+/** Aborts before the confirm that reflect the instrument's quote (spec §8.7, §10): its key backs off. */
+const QUOTE_ABORT_STAGES: ReadonlySet<string> = new Set(['requote', 'price-floor', 'gas', 'guard']);
+/** Guard checks about the state rather than the quote (fresh gates, the strike against spot): no backoff. */
+const STATE_CHECK_IDS: ReadonlySet<string> = new Set(['C2', 'C10']);
 
 /**
  * The daemon loop (spec §9.1), at a fixed delay: a tick, then `tickSeconds` of sleep, so a slow trade never
@@ -94,6 +107,10 @@ const HOUR_SEC = 3_600;
  * record each) → `evaluate` → a `decisions` record. An `apr-floor` hold backs off the keys it quoted and re-plans
  * after `replanSec`. Then `pickSide`'s trade, if any, is executed once: in live unless halted or STOP is present,
  * in dry-run always (STOP included), where an `aborted('dry-run')` records the simulated deployment (spec §8.8).
+ * An execution aborted before the confirm on its quote (re-quote, price floor, gas, a guard other than C2 and C10)
+ * backs the executed instrument's key off, a custom strike's included. After an execution `STATUS.json` is written
+ * again; the `--max-trades` exit is decided before that bookkeeping, so a failure in it never keeps a finished run
+ * going.
  */
 export async function runLoop(deps: LoopDeps, config: AppConfig): Promise<void> {
   const run: Run = { tick: 0, consecutiveFailures: 0, completed: 0, lastTradeAtSec: null, lastHold: {} };
@@ -137,7 +154,7 @@ async function tick(deps: LoopDeps, config: AppConfig, run: Run): Promise<boolea
   warnOverdueSettlements(st, fetched, c, deps.log);
   const t: Tick = { deps, config, c, run, st, s: { ...fetched, memo: memo.snapshotMemo() } };
 
-  writeStatus(deps, c, run, holdReasons(t));
+  publishStatus(deps, c, run, () => holdReasons(t));
   record(t, 'state', stateRecord(run.tick, st, t.s, memo));
   const trades: Trade[] = [];
   for (const side of SIDES) {
@@ -183,9 +200,9 @@ async function decideSide(t: Tick, side: Side): Promise<Decision | null> {
 }
 
 /**
- * The planned candidates split into those to quote and the keys left out as backed off, after resetting any key
- * whose spot or indicative APR moved enough. `planSide` sees the full snapshot, so the backoff never changes what
- * it plans (normal or fallback, and which fallback strike); it only throttles the RFQs.
+ * The planned candidates (custom strikes included) split into those to quote and the keys left out as backed off,
+ * after resetting any key whose spot or indicative APR moved enough. `planSide` sees the full snapshot, so the
+ * backoff never changes what it plans (normal or fallback, and which fallback strike); it only throttles the RFQs.
  */
 function withoutBackedOff(
   candidates: Candidate[],
@@ -194,7 +211,6 @@ function withoutBackedOff(
 ): { ready: Candidate[]; backedOff: string[] } {
   const backedOff: string[] = [];
   const ready = candidates.filter((candidate) => {
-    if (candidate.indicativeApr === null) return true;
     const key = candidateKey(candidate);
     memo.resetBackoffIf(key, s.market.spotE8, candidate.indicativeApr);
     if (!memo.isBackedOff(key, s.nowSec)) return true;
@@ -235,20 +251,18 @@ async function requestQuote(deps: LoopDeps, candidate: Candidate): Promise<Quote
 }
 
 /**
- * Key backoff (spec §8.7, §10) for the listed candidates (a custom strike has no listing and is left to
- * `replanSec`): one whose RFQ failed on its own (anything but a closed socket) or whose gas preview failed, and,
- * when the side held, every one that was answered (none cleared the floor). An `apr-floor` hold also schedules
- * the side's re-plan.
+ * Key backoff (spec §8.7, §10) for the quoted candidates, listed or custom strikes: one whose RFQ failed on its own
+ * (anything but a closed socket; a custom strike the server refuses included) or whose gas preview failed, and,
+ * when the side held, every one that was answered (none cleared the floor). An `apr-floor` hold also schedules the
+ * side's re-plan.
  */
 function backOff(t: Tick, side: Side, quoted: QuotedCandidate[], decision: Decision): void {
   const { deps, c, run, s } = t;
   const { memo } = deps;
   for (const { candidate, outcome } of quoted) {
-    const apr = candidate.indicativeApr;
-    if (apr === null) continue;
     const failed = outcome.ok ? !outcome.gas.ok : outcome.error !== 'socket-closed';
     if (failed || (outcome.ok && decision.kind === 'hold')) {
-      memo.backoffKey(candidateKey(candidate), s.nowSec, s.market.spotE8, apr);
+      memo.backoffKey(candidateKey(candidate), s.nowSec, s.market.spotE8, candidate.indicativeApr);
     }
   }
   if (decision.kind === 'hold' && decision.reason === 'apr-floor') {
@@ -257,7 +271,11 @@ function backOff(t: Tick, side: Side, quoted: QuotedCandidate[], decision: Decis
   }
 }
 
-/** Executes `pickSide`'s trade at most once; true when `--max-trades` is reached. */
+/**
+ * Executes `pickSide`'s trade at most once and counts it, deciding the `--max-trades` exit, then records its result,
+ * backs its key off when it aborted on its quote, applies it to the cooldowns and halts and rewrites `STATUS.json`;
+ * true when `--max-trades` is reached. Once it is, a failure in that bookkeeping is logged and the run still ends.
+ */
 async function executePicked(t: Tick, trades: Trade[]): Promise<boolean> {
   const { deps, config, c, run, s } = t;
   const { memo } = deps;
@@ -278,27 +296,86 @@ async function executePicked(t: Tick, trades: Trade[]): Promise<boolean> {
     maxGasFee6: picked.maxGasFee6,
   };
   const counterBefore = await vaultCounterBefore(deps, s);
-  const { result, thrown } = await executeOnce(deps, intent, s);
+  const { result, execId, thrown } = await executeOnce(deps, intent, s);
   const nowSec = chainNowSec(s, deps.clock);
-  const failure = thrown === undefined ? {} : { thrown };
-  const summary = intentSummary(intent);
-  record(t, 'executions', { tick: run.tick, step: 'result', side, intent: summary, result, ...failure });
-
-  const { strikeE8, expirySec, quantityE18 } = picked.candidate;
-  const terms = { isPut: side === 'put', strikeE8, expirySec, quantityE18 };
-  applyTradeResult(memo, side, result, nowSec, c, {
-    terms,
-    counterBefore,
-    writeStop: (reason) => deps.writeStop(reason),
-    log: deps.log,
-  });
-  const simulated = c.mode === 'dry-run' && result.status === 'aborted' && result.stage === 'dry-run';
-  if (simulated) memo.simulatedDeploySec[side] = nowSec;
-  if (simulated || (c.mode === 'live' && result.status === 'filled')) {
+  if (completesExecution(c, result)) {
     run.completed += 1;
     run.lastTradeAtSec = nowSec;
   }
-  return config.maxTrades !== undefined && run.completed >= config.maxTrades;
+  // Decided before the bookkeeping below, which may throw: a finished `--max-trades` run never sends again.
+  const done = config.maxTrades !== undefined && run.completed >= config.maxTrades;
+  try {
+    const failure = thrown === undefined ? {} : { thrown };
+    const backoff = backOffExecuted(t, picked.candidate, result, nowSec);
+    const summary = intentSummary(intent);
+    const body = {
+      tick: run.tick,
+      step: 'result',
+      execId,
+      side,
+      intent: summary,
+      result,
+      backoff,
+      ...failure,
+    };
+    record(t, 'executions', body);
+
+    const { strikeE8, expirySec, quantityE18 } = picked.candidate;
+    const terms = { isPut: side === 'put', strikeE8, expirySec, quantityE18 };
+    applyTradeResult(memo, side, result, nowSec, c, {
+      terms,
+      counterBefore,
+      writeStop: (reason) => deps.writeStop(reason),
+      log: deps.log,
+    });
+    const simulated = c.mode === 'dry-run' && result.status === 'aborted' && result.stage === 'dry-run';
+    if (simulated) memo.simulatedDeploySec[side] = nowSec;
+    publishStatus(deps, c, run, () => holdReasons(afterExecution(t)));
+  } catch (error) {
+    if (!done) throw error;
+    deps.log.error({ err: error, side }, 'bookkeeping after the last --max-trades execution failed');
+  }
+  return done;
+}
+
+/**
+ * Whether `result` counts towards `--max-trades`: in live, any result whose confirm was sent, so a supervised
+ * `--max-trades 1` never sends a second confirm whatever the first one's outcome; in dry-run the simulated
+ * deployment.
+ */
+function completesExecution(c: WheelConfig, result: TradeResult): boolean {
+  if (c.mode === 'dry-run') return result.status === 'aborted' && result.stage === 'dry-run';
+  return result.status !== 'aborted' || result.stage === 'confirm-rejected';
+}
+
+/**
+ * Key backoff (spec §8.7, §10) for an execution that aborted before the confirm on its quote: the re-quote failed,
+ * came in under `minPriceE18`, its gas failed, or a guard other than C2 (the fresh state) and C10 (the strike
+ * against spot) refused it. Such an abort repeats on the next tick's identical plan, so the key waits like a
+ * below-floor quote's, a custom strike's included (it has no indicative APR, so only a spot move resets it). Returns
+ * what was backed off.
+ */
+function backOffExecuted(
+  t: Tick,
+  candidate: Candidate,
+  result: TradeResult,
+  nowSec: number,
+): { key: string; untilSec: number; n: number } | null {
+  if (result.status !== 'aborted' || !QUOTE_ABORT_STAGES.has(result.stage)) return null;
+  if (result.stage === 'guard' && result.checkId !== undefined && STATE_CHECK_IDS.has(result.checkId)) {
+    return null;
+  }
+  const { memo } = t.deps;
+  const key = candidateKey(candidate);
+  memo.backoffKey(key, nowSec, t.s.market.spotE8, candidate.indicativeApr);
+  const entry = memo.keyBackoff.get(key);
+  return entry === undefined ? null : { key, untilSec: entry.untilSec, n: entry.n };
+}
+
+/** The tick re-derived on the memo as the execution left it, so `STATUS.json` shows the new cooldown and interval. */
+function afterExecution(t: Tick): Tick {
+  const s: Snapshot = { ...t.s, memo: t.deps.memo.snapshotMemo() };
+  return { ...t, s, st: deriveState(s, t.c) };
 }
 
 /**
@@ -309,10 +386,14 @@ async function executeOnce(
   deps: LoopDeps,
   intent: TradeIntent,
   s: Snapshot,
-): Promise<{ result: TradeResult; thrown?: string }> {
+): Promise<{ result: TradeResult; execId: string | null; thrown?: string }> {
+  const exec: { id: string | null } = { id: null };
   deps.memo.inFlight = true;
   try {
-    return { result: await deps.execute(intent) };
+    const result = await deps.execute(intent, (execId) => {
+      exec.id ??= execId;
+    });
+    return { result, execId: exec.id };
   } catch (error) {
     deps.log.error({ err: error, side: intent.side }, 'execute threw: treating the outcome as unknown');
     const thrown = error instanceof Error ? error.message : String(error);
@@ -322,7 +403,7 @@ async function executeOnce(
       confirmSentAtSec: s.nowSec,
       bookkeepingErrors: [],
     };
-    return { result, thrown };
+    return { result, execId: exec.id, thrown };
   } finally {
     deps.memo.inFlight = false;
   }
@@ -374,29 +455,37 @@ function snapshotFailed(deps: LoopDeps, c: WheelConfig, run: Run, error: unknown
   if (run.consecutiveFailures === ESCALATE_AT_FAILURE) {
     deps.log.error(detail, 'snapshot failed three ticks in a row');
   }
-  writeStatus(deps, c, run, { put: 'stale-data', call: 'stale-data' });
+  publishStatus(deps, c, run, () => ({ put: 'stale-data', call: 'stale-data' }));
 }
 
-function writeStatus(
+/**
+ * Writes `STATUS.json` through `deps.status` with the hold reasons `holdsOf` derives; a failed derivation or write is
+ * logged and never stops the tick.
+ */
+function publishStatus(
   deps: LoopDeps,
   c: WheelConfig,
   run: Run,
-  holds: Partial<Record<Side, HoldReason>>,
+  holdsOf: () => Partial<Record<Side, HoldReason>>,
 ): void {
   const halted = c.mode === 'live' && deps.memo.haltedLive;
-  const holding = Object.keys(holds).length > 0;
   try {
+    const holds = holdsOf();
+    const holding = Object.keys(holds).length > 0;
     deps.status({
       tsMs: deps.clock.nowMs(),
       health: halted ? 'halted' : holding ? 'holding' : 'ok',
       holdReasons: holds,
       halted,
       lastTradeAtSec: run.lastTradeAtSec,
+      completed: run.completed,
       tick: run.tick,
       mode: c.mode,
+      frontendSha: deps.frontendSha(),
+      frontendChanged: deps.memo.frontendChanged,
     });
   } catch (error) {
-    deps.log.error({ err: error }, 'could not write STATUS.json');
+    deps.log.error({ err: error }, 'could not derive or write STATUS.json');
   }
 }
 

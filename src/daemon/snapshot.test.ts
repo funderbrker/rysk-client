@@ -115,6 +115,19 @@ describe('gatherSnapshot', () => {
     expect(s.positions).toHaveLength(77);
   });
 
+  it('counts a duplicated foreign row once and warns about it', async () => {
+    const rows = fixture('positions.json') as Record<string, unknown>[];
+    const foreign = rows.find((row) => row.symbol === 'UBTC');
+    const userPositions = vi.fn(async () => [...rows, foreign]);
+    const src = sources({ rest: rest({ userPositions }) });
+    const s = await gatherSnapshot(src);
+    expect(s.otherRowCount).toBe(10);
+    expect(src.log.warn).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ positionWarnings: [expect.stringContaining('2 rows share the key')] }),
+      expect.any(String),
+    );
+  });
+
   it('parses the positions afresh on every call', async () => {
     const rows = fixture('positions.json') as unknown[];
     const userPositions = vi

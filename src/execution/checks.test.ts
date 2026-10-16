@@ -164,6 +164,25 @@ describe('runPreSignChecks', () => {
     expect(result).toMatchObject({ ok: true, gasFee6: 123_456n });
   });
 
+  it("accepts a gas fee equal to the intent's maxGasFee6 and names the intent when above it", () => {
+    const ctx = context('put');
+    ctx.intent.maxGasFee6 = 100_000n;
+    ctx.gasFee6 = 100_000n;
+    expect(runPreSignChecks(ctx).ok).toBe(true);
+
+    ctx.gasFee6 = 100_001n;
+    expect(expectFailure(ctx, 'C9').detail).toBe("gas fee 100001 above the intent's 100000");
+  });
+
+  it("fails C14's tranche clause on its own", () => {
+    const ctx = context('put');
+    patchBody(ctx, { quantity: '50000000000000000000', collateralAmount: '3900000000' });
+    ctx.fresh.allowance = 3900000000n;
+    ctx.fresh.capHeadroomE18 = null;
+    ctx.config.maxContractsPerTradeE18 = 50n * E18;
+    expect(expectFailure(ctx, 'C14').detail).toContain('cap-bounded tranche');
+  });
+
   it('brands a frozen copy of the body', () => {
     const ctx = context('put');
     const result = runPreSignChecks(ctx);
@@ -225,6 +244,14 @@ describe('runPreSignChecks', () => {
     ['an echoed isPremium true', 'C9', (ctx) => (ctx.echoed = { ...ctx.echoed, isPremium: true })],
     ['a gas fee of 1 USD (above 2 % of premium)', 'C9', (ctx) => (ctx.gasFee6 = 1_000_000n)],
     ['a gas fee within 2 % but above 0.5 USD', 'C9', (ctx) => (ctx.gasFee6 = 500_001n)],
+    [
+      "a gas fee within the config's limits but above the intent's",
+      'C9',
+      (ctx) => {
+        ctx.gasFee6 = 100_001n;
+        ctx.intent.maxGasFee6 = 100_000n;
+      },
+    ],
     ['spot at the put strike', 'C10', (ctx) => (ctx.fresh.spotE8 = 7800000000n)],
     ['a put strike below 0.6 × spot', 'C10', (ctx) => (ctx.fresh.spotE8 = 13100000000n)],
     ['a strike off the strike grid', 'C10', (ctx) => (ctx.config.strikePrecisionE8 = 7_000_000n)],
@@ -244,11 +271,12 @@ describe('runPreSignChecks', () => {
       },
     ],
     [
-      'a quantity above the fresh tranche',
+      'a quantity above the fresh tranche, with no cap applying',
       'C14',
       (ctx) => {
         patchBody(ctx, { quantity: '50000000000000000000', collateralAmount: '3900000000' });
         ctx.fresh.allowance = 3900000000n;
+        ctx.fresh.capHeadroomE18 = null;
         ctx.config.maxContractsPerTradeE18 = 50n * E18;
       },
     ],
@@ -492,15 +520,36 @@ describe('runPreSignChecks', () => {
         expectFailure(eligible, 'C18');
       });
 
-      it('accepts an unlisted custom strike equal to the candidate strike', () => {
+      it('fails C18 for a fallback strike that clears the basis: fallback mode sells below it only', () => {
+        const ctx = fallback();
+        ctx.fresh.basisE8 = 8450000000n;
+        expect(expectFailure(ctx, 'C18').detail).toContain('not a fallback');
+
+        ctx.fresh.basisE8 = 8450000001n;
+        expect(runPreSignChecks(ctx).ok).toBe(true);
+      });
+
+      function custom(freshKStarE8: bigint | null): CheckContext {
         const ctx = fallback();
         ctx.intent.candidate.mode = 'basis-fallback-custom';
         ctx.fresh.listedStrikesE8ForExpiry = [];
-        ctx.fresh.freshFallbackStrikeE8 = 8700000000n;
+        ctx.fresh.freshFallbackStrikeE8 = freshKStarE8;
+        return ctx;
+      }
+
+      it('accepts an unlisted custom strike above the fresh K*, equal to the candidate strike', () => {
+        const ctx = custom(8400000000n);
         expect(runPreSignChecks(ctx).ok).toBe(true);
 
         ctx.intent.candidate.strikeE8 = 8460000000n;
         expectFailure(ctx, 'C18');
+      });
+
+      it('fails a custom strike at or below the fresh K*, or with no fresh K*', () => {
+        // The custom 84.5 against a fresh K* of 87, of 84.5, and none.
+        for (const freshKStarE8 of [8700000000n, 8450000000n, null]) {
+          expectFailure(custom(freshKStarE8), 'C18');
+        }
       });
     });
   });

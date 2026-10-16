@@ -10,8 +10,9 @@ import {
   wheelConfig,
 } from '../../../test/helpers/wheelSnapshot.ts';
 import { TOKENS } from '../../domain/constants.ts';
-import type { Position, Side } from '../../domain/types.ts';
+import type { Listing, Position, Quote, Side } from '../../domain/types.ts';
 import {
+  ALL_LISTED_MAX_TENOR_DAYS,
   basisEligible,
   CUSTOM_STRIKE_PRECISION_E8,
   customFallbackStrikeE8,
@@ -19,8 +20,9 @@ import {
   planSide,
 } from './candidates.ts';
 import type { CallFallbackConfig, SideConfig } from './config.ts';
+import { evaluate } from './evaluate.ts';
 import { deriveState } from './state.ts';
-import type { Candidate, SidePlan, WheelState } from './types.ts';
+import type { Candidate, QuoteOutcome, SidePlan, Snapshot, WheelState } from './types.ts';
 
 const E18 = 10n ** 18n;
 const HOUR_SEC = 3600;
@@ -41,7 +43,14 @@ const LIMITS: Partial<SideConfig> = {
   minApr: 0.1,
 };
 
-type Case = { basisE8?: bigint; state?: Partial<WheelState>; config?: ConfigPatch };
+type Case = {
+  basisE8?: bigint;
+  state?: Partial<WheelState>;
+  config?: ConfigPatch;
+  /** Extra listings beside the fixture's. */
+  listings?: Listing[];
+  mode?: Snapshot['mode'];
+};
 
 /** The fixture rows with the open put deployed two days back, so the put's 24 h interval has passed. */
 function happyPositions(): Position[] {
@@ -53,8 +62,14 @@ function happyPositions(): Position[] {
 /** The fixture tick at spot 81.48 with every gate passing; one lot fits on each side. */
 function tick(test: Case = {}) {
   const s = snapshotFromFixtures({
+    mode: test.mode ?? 'live',
     positions: happyPositions(),
-    market: { assets: fixtureAssets(), listings: fixtureListings(), caps: fixtureCaps(), spotE8: SPOT_E8 },
+    market: {
+      assets: fixtureAssets(),
+      listings: [...fixtureListings(), ...(test.listings ?? [])],
+      caps: fixtureCaps(),
+      spotE8: SPOT_E8,
+    },
     memo: { lastNoPendingSeenSec: NOW_SEC - HOUR_SEC },
   });
   const { put, call, ...rest } = test.config ?? {};
@@ -86,6 +101,55 @@ function fallback(patch: Partial<CallFallbackConfig>): CallFallbackConfig {
 
 const terms = (candidates: Candidate[]) =>
   candidates.map(({ strikeE8, expirySec, mode }) => ({ strikeE8, expirySec, mode }));
+
+/** A copy of the fixture's listing of `side` at `strikeE8` and `expirySec`, moved to `patch`'s strike or expiry. */
+function moved(side: Side, strikeE8: bigint, expirySec: number, patch: Partial<Listing>): Listing {
+  const listing = fixtureListings().find(
+    (l) => l.isPut === (side === 'put') && l.strikeE8 === strikeE8 && l.expirySec === expirySec,
+  );
+  if (listing === undefined) throw new Error(`no fixture ${side} ${strikeE8} at ${expirySec}`);
+  return { ...listing, ...patch };
+}
+
+const movedCall = (strikeE8: bigint, expirySec: number, patch: Partial<Listing>) =>
+  moved('call', strikeE8, expirySec, patch);
+
+function held(result: SidePlan): Extract<SidePlan, { kind: 'hold' }> {
+  if (result.kind !== 'hold') throw new Error(`expected a hold, got ${result.candidates.length} candidates`);
+  return result;
+}
+
+/** An answered quote for `k` at `priceE18` with no gas fee. */
+function answered(k: Candidate, priceE18: bigint): QuoteOutcome {
+  const quote: Quote = {
+    assetAddress: k.request.asset,
+    chainId: k.request.chainId,
+    expiry: k.expirySec,
+    isPut: k.request.isPut,
+    isTakerBuy: false,
+    quantity: k.request.quantity,
+    strike: k.request.strike,
+    maker: '0x0000000000000000000000000000000000000Bad',
+    nonce: '1',
+    price: priceE18.toString(),
+    validUntil: NOW_SEC + 60,
+    signature: '0x00',
+    usd: k.request.usd,
+    collateralAsset: k.request.collateralAsset,
+    apy: 5,
+  };
+  return {
+    ok: true,
+    quote,
+    requestedAtMs: 0,
+    respondedAtMs: 1,
+    makerSigOk: true,
+    gas: { ok: true, gasFee6: 0n },
+  };
+}
+
+/** A 36 h to 7 d window: only the 6.9-day expiry E1, whose highest call strike (K*) is 88.5. */
+const E1_ONLY: Partial<SideConfig> = { maxDaysToExpiry: 7 };
 
 describe('planSide: puts', () => {
   it('quotes three diversified OTM puts inside the tenor window, best first', () => {
@@ -264,6 +328,65 @@ describe('planSide: calls', () => {
     expect(terms(result.candidates)).toEqual([{ strikeE8: 10500000000n, expirySec: E4, mode: 'normal' }]);
   });
 
+  it('holds no-candidates instead of falling back when the tenor window holds no call', () => {
+    // The review's probe: a 36 h to 5 d window has no expiry, and K* (88.5 at 6.9 days) clears an 86 basis. The old
+    // planner sold it as a basis fallback, skipping the APR floor; at a 120 basis it would have sold it below basis.
+    for (const basisE8 of [8600000000n, 12000000000n]) {
+      const result = held(plan('call', { basisE8, config: { call: { maxDaysToExpiry: 5 } } }));
+      expect(result.reason).toBe('no-candidates');
+      expect(result.detail).toBe('no call listing passes the product, tenor, moneyness and size filters');
+      expect(result.excluded.length).toBeGreaterThan(0);
+      expect(result.excluded.every((e) => e.reason === 'tenor')).toBe(true);
+    }
+  });
+
+  it('plans a K* that clears the basis as a normal candidate, held to the APR floor', () => {
+    // Only E1 is in the window; at an 88 basis only K* (88.5) clears it.
+    const test: Case = { basisE8: 8800000000n, config: { call: E1_ONLY } };
+    const { st, s, c } = tick(test);
+    const result = planSide('call', st, s, c);
+    if (result.kind !== 'quote') throw new Error(`expected a quote plan, got hold '${result.reason}'`);
+    expect(terms(result.candidates)).toEqual([{ strikeE8: 8850000000n, expirySec: E1, mode: 'normal' }]);
+
+    // 2 USD on 25 calls (about 5 % APR) is below the 10 % floor: it holds, where a fallback would take it.
+    const [k] = result.candidates;
+    if (k === undefined) throw new Error('no candidate');
+    const quotedAt = (candidate: Candidate) => [
+      { candidate, outcome: answered(candidate, 80000000000000000n) },
+    ];
+    expect(evaluate('call', quotedAt(k), st, s, c)).toMatchObject({ kind: 'hold', reason: 'apr-floor' });
+    const asFallback: Candidate = { ...k, mode: 'basis-fallback' };
+    expect(evaluate('call', quotedAt(asFallback), st, s, c)).toMatchObject({ kind: 'trade' });
+  });
+
+  it('never sells a K* that clears the basis in fallback mode', () => {
+    // K* at E1 is a listed 120, above 1.4 × spot; no strike that passes the filters clears a 100 basis.
+    const listings = [movedCall(8850000000n, E1, { strikeE8: 12000000000n })];
+    const config = { call: { fallback: fallback({ customStrikeFirst: true }) } };
+    const result = held(plan('call', { basisE8: 10000000000n, listings, config }));
+    expect(result.reason).toBe('no-candidates');
+    expect(result.detail).toBe(
+      'the fallback strike 12000000000 clears the basis, so it takes the normal path but fails the moneyness filter',
+    );
+  });
+
+  it('falls back only below the basis threshold and drops a custom strike not above K*', () => {
+    // A 1 % margin: an 88 or 88.5 basis puts the threshold above K* (88.5), and the custom strike (88, 88.5) is not
+    // above it, so only K* is quoted.
+    for (const basisE8 of [8800000000n, 8850000000n]) {
+      const fb = fallback({ customStrikeFirst: true });
+      const config = { call: { ...E1_ONLY, minStrikeOverBasisPct: 0.01, fallback: fb } };
+      const { candidates } = quoted('call', { basisE8, config });
+      expect(terms(candidates)).toEqual([{ strikeE8: 8850000000n, expirySec: E1, mode: 'basis-fallback' }]);
+    }
+    // At 89 the custom strike (89) is above K*, so it is quoted first.
+    const config = { call: { ...E1_ONLY, fallback: fallback({ customStrikeFirst: true }) } };
+    expect(terms(quoted('call', { basisE8: 8900000000n, config }).candidates)).toEqual([
+      { strikeE8: 8900000000n, expirySec: E1, mode: 'basis-fallback-custom' },
+      { strikeE8: 8850000000n, expirySec: E1, mode: 'basis-fallback' },
+    ]);
+  });
+
   it('quotes eligible strikes even when all are below the APR prefilter', () => {
     // Basis 90: only 91.5 and 93.5 at 13.9 days clear it, with indicative APRs 0.10 and 0.07 under minApr 0.4 × 0.5.
     const test: Case = { basisE8: 9000000000n, config: { call: { minApr: 0.4 } } };
@@ -287,6 +410,87 @@ describe('planSide: calls', () => {
     const { st } = tick();
     const state = { basis: { ...st.basis, reliable: false, reason: 'basis-negative' } };
     expect(plan('call', { state })).toMatchObject({ kind: 'hold', reason: 'basis-unreliable' });
+  });
+});
+
+describe('planSide: the checks it mirrors', () => {
+  it("excludes strikes outside C10's 0.6 S to 1.4 S band as moneyness", () => {
+    // 1.4 × 81.48 = 114.07 and 0.6 × 81.48 = 48.89.
+    const call = movedCall(8850000000n, E1, { strikeE8: 11450000000n });
+    const put = moved('put', 7450000000n, E1, { strikeE8: 4850000000n });
+    const test: Case = { basisE8: 5000000000n, listings: [call, put] };
+    for (const side of ['call', 'put'] as const) {
+      const { excluded, candidates } = quoted(side, test);
+      const strikeE8 = side === 'call' ? 11450000000n : 4850000000n;
+      expect(excluded).toContainEqual({ strikeE8, expirySec: E1, reason: 'moneyness' });
+      expect(candidates.map((candidate) => candidate.strikeE8)).not.toContain(strikeE8);
+    }
+    // 114 is inside the band.
+    const inside = movedCall(8850000000n, E1, { strikeE8: 11400000000n });
+    const { excluded } = quoted('call', { basisE8: 5000000000n, listings: [inside] });
+    expect(excluded.find((e) => e.strikeE8 === 11400000000n)?.reason).not.toBe('moneyness');
+  });
+
+  it("caps the relaxed tenor under scope 'all-listed' at C11's year", () => {
+    expect(ALL_LISTED_MAX_TENOR_DAYS).toBe(366);
+    const far = movedCall(10500000000n, E4, { expirySec: NOW_SEC + 367 * DAY_SEC, indicativeApr: 0.9 });
+    const allListed = fallback({ scope: 'all-listed' });
+    const capped = quoted('call', {
+      basisE8: 10000000000n,
+      listings: [far],
+      config: { call: { fallback: allListed } },
+    });
+    expect(capped.excluded).toContainEqual({
+      strikeE8: 10500000000n,
+      expirySec: far.expirySec,
+      reason: 'tenor',
+    });
+    expect(capped.candidates.map((candidate) => candidate.expirySec)).not.toContain(far.expirySec);
+
+    // A configured window longer than a year is the bound instead, as in `executionConfig`.
+    const config = { call: { maxDaysToExpiry: 400, fallback: allListed } };
+    const longer = quoted('call', { basisE8: 10000000000n, listings: [far], config });
+    expect(longer.candidates[0]).toMatchObject({ strikeE8: 10500000000n, expirySec: far.expirySec });
+  });
+
+  describe("live: C16's 24 h notional with the trade included", () => {
+    // 2 000 USD a day: a put lot at 80 or above (25 × 80 = 2 000) and a call lot at spot (2 037) reach it.
+    const limit = { safety: { maxNotionalPer24h6: 2000_000000n } };
+
+    it('excludes the listings that would reach the limit as daily-limit', () => {
+      const result = quoted('put', { config: limit });
+      expect(result.candidates.every((candidate) => candidate.strikeE8 < 8000000000n)).toBe(true);
+      expect(result.candidates.length).toBeGreaterThan(0);
+      const limited = result.excluded.filter((e) => e.reason === 'daily-limit').map((e) => e.strikeE8);
+      expect(limited).toEqual(expect.arrayContaining([8050000000n, 8000000000n]));
+      expect(limited.every((strikeE8) => strikeE8 >= 8000000000n)).toBe(true);
+    });
+
+    it('counts the notional of the last 24 h', () => {
+      // 18 100 of 20 000 used: a put lot fits below 76.
+      const state = { notionalLast24h6: 18_100_000000n };
+      const { candidates } = quoted('put', { state });
+      expect(candidates.length).toBeGreaterThan(0);
+      expect(candidates.every((candidate) => candidate.strikeE8 * 25n < 1900n * 10n ** 8n)).toBe(true);
+    });
+
+    it('holds daily-limit when no candidate fits, on the normal path and in the fallback', () => {
+      expect(plan('call', { basisE8: 5000000000n, config: limit })).toMatchObject({
+        kind: 'hold',
+        reason: 'daily-limit',
+      });
+      expect(plan('call', { basisE8: 12000000000n, config: limit })).toMatchObject({
+        kind: 'hold',
+        reason: 'daily-limit',
+        detail: 'the fallback strikes would reach the 24 h notional limit',
+      });
+    });
+
+    it('does not apply in dry-run (gate G11 is live only)', () => {
+      const result = quoted('call', { basisE8: 5000000000n, config: limit, mode: 'dry-run' });
+      expect(result.candidates.length).toBeGreaterThan(0);
+      expect(result.excluded.some((e) => e.reason === 'daily-limit')).toBe(false);
+    });
   });
 });
 
@@ -344,6 +548,20 @@ describe('customFallbackStrikeE8', () => {
     expect(customFallbackStrikeE8(12000000000n, SPOT_E8, CUSTOM_STRIKE_PRECISION_E8)).toBe(11400000000n);
     expect(customFallbackStrikeE8(9010000000n, SPOT_E8, CUSTOM_STRIKE_PRECISION_E8)).toBe(9050000000n);
     expect(customFallbackStrikeE8(9000000000n, SPOT_E8, CUSTOM_STRIKE_PRECISION_E8)).toBe(9000000000n);
+  });
+
+  it("rounds down when rounding up would leave C10's 1.4 × spot band", () => {
+    // 1.393 × 35.3 = 49.17…: 49.5 is above 1.4 × 35.3 = 49.42, so 49.
+    expect(customFallbackStrikeE8(12000000000n, 3530000000n, CUSTOM_STRIKE_PRECISION_E8)).toBe(4900000000n);
+  });
+
+  it('stays on the grid and inside the band at any spot', () => {
+    for (let spotE8 = 2000000000n; spotE8 <= 20000000000n; spotE8 += 37_000_000n) {
+      const strikeE8 = customFallbackStrikeE8(10n ** 12n, spotE8, CUSTOM_STRIKE_PRECISION_E8);
+      expect(strikeE8 % CUSTOM_STRIKE_PRECISION_E8).toBe(0n);
+      expect(strikeE8 * 10n <= spotE8 * 14n).toBe(true);
+      expect(strikeE8 + CUSTOM_STRIKE_PRECISION_E8 > (spotE8 * 1393n) / 1000n).toBe(true);
+    }
   });
 
   it('uses a 0.5 USD precision', () => {

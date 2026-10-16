@@ -169,6 +169,7 @@ function harness(mode: Mode, patch: Partial<LoopDeps> = {}) {
     status: vi.fn<(s: StatusFile) => void>(),
     stopFile: vi.fn(() => false),
     frontendChanged: vi.fn(() => false),
+    frontendSha: vi.fn((): string | null => 'f00dcafe'),
     writeStop: vi.fn(),
     clock,
     log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
@@ -249,15 +250,53 @@ describe('runLoop: dry-run', () => {
     });
     expect(h.memo.keyBackoff.size).toBe(3);
 
-    expect(h.deps.status).toHaveBeenCalledTimes(2);
-    const status = vi.mocked(h.deps.status).mock.calls[1]?.[0];
-    expect(status).toMatchObject({
+    // Tick 1 writes STATUS.json before planning and again after its execution; tick 2 once.
+    const statuses = vi.mocked(h.deps.status).mock.calls.map(([status]) => status);
+    expect(statuses.map((status) => status.tick)).toEqual([1, 1, 2]);
+    expect(statuses[0]).toMatchObject({ health: 'ok', holdReasons: {}, lastTradeAtSec: null, completed: 0 });
+    expect(statuses[1]).toMatchObject({
+      health: 'holding',
+      holdReasons: { put: 'interval', call: 'apr-floor' },
+      lastTradeAtSec: NOW_SEC,
+      completed: 1,
+      tick: 1,
+    });
+    expect(statuses[2]).toEqual({
+      tsMs: NOW_SEC * 1000 + TICK_MS,
       health: 'holding',
       holdReasons: { put: 'interval', call: 'apr-floor' },
       halted: false,
       lastTradeAtSec: NOW_SEC,
+      completed: 1,
       tick: 2,
       mode: 'dry-run',
+      frontendSha: 'f00dcafe',
+      frontendChanged: false,
+    });
+  });
+
+  it('carries the execution id of sellOption in the result record', async () => {
+    const execute = vi.fn(async (_: TradeIntent, onExecId?: (execId: string) => void) => {
+      onExecId?.('exec-1');
+      onExecId?.('exec-2');
+      return DRY_RUN;
+    });
+    const h = harness('dry-run', { execute });
+    await runTicks(h, appConfig('dry-run'), 1);
+    expect(h.of('executions')).toEqual([expect.objectContaining({ step: 'result', execId: 'exec-1' })]);
+
+    const silent = harness('dry-run');
+    await runTicks(silent, appConfig('dry-run'), 1);
+    expect(silent.of('executions')).toEqual([expect.objectContaining({ step: 'result', execId: null })]);
+  });
+
+  it('shows the frontend tripwire in STATUS.json: the sha (null while inactive) and whether it changed', async () => {
+    const h = harness('dry-run', { frontendSha: vi.fn(() => null), frontendChanged: vi.fn(() => true) });
+    await runTicks(h, appConfig('dry-run'), 1);
+    expect(vi.mocked(h.deps.status).mock.calls[0]?.[0]).toMatchObject({
+      frontendSha: null,
+      frontendChanged: true,
+      holdReasons: { put: 'frontend-changed', call: 'frontend-changed' },
     });
   });
 
@@ -477,6 +516,125 @@ describe('runLoop: dry-run', () => {
       reason: 'settlement-pending',
     });
   });
+
+  describe('an execution aborted before the confirm', () => {
+    const oneEach = { quoting: { ...wheelConfig().quoting, quotesPerSide: 1 } };
+    const aborted = (stage: string, checkId?: string): TradeResult => ({
+      status: 'aborted',
+      stage: stage as 'guard',
+      message: `${stage} failed`,
+      ...(checkId === undefined ? {} : { checkId }),
+    });
+    const putKey = keyOf('put', 8050000000n, E1);
+    const putQuotes = (h: ReturnType<typeof harness>, tick: number) =>
+      h.of('quotes').filter((q) => q.side === 'put' && q.tick === tick);
+
+    it.each([
+      ['gas', undefined],
+      ['price-floor', undefined],
+      ['requote', undefined],
+      ['guard', 'C9'],
+      ['guard', 'C7'],
+      ['guard', undefined],
+    ])(
+      '%s %s backs the executed key off: the next tick holds it at the floor without an RFQ',
+      async (stage, checkId) => {
+        const h = harness('dry-run', { execute: vi.fn(async () => aborted(stage, checkId)) });
+        await runTicks(h, appConfig('dry-run', {}, oneEach), 2);
+
+        expect(h.deps.execute).toHaveBeenCalledOnce();
+        expect(h.of('executions')[0]).toMatchObject({
+          step: 'result',
+          result: { status: 'aborted', stage },
+          backoff: { key: putKey, n: 1, untilSec: NOW_SEC + 300 },
+        });
+        expect(putQuotes(h, 1)).toHaveLength(1);
+        expect(putQuotes(h, 2)).toEqual([]);
+        const put2 = h.of('decisions').find((d) => d.tick === 2 && d.side === 'put');
+        expect(backedOff(put2)).toEqual([putKey]);
+        expect(put2?.result).toMatchObject({
+          kind: 'hold',
+          reason: 'apr-floor',
+          detail: `every candidate is backed off: ${putKey}`,
+        });
+      },
+    );
+
+    it.each([
+      ['guard', 'C2'],
+      ['guard', 'C10'],
+      ['precheck', undefined],
+      ['approve', undefined],
+      ['shutdown', undefined],
+    ])('%s %s leaves the key alone: the next tick quotes it again', async (stage, checkId) => {
+      const h = harness('dry-run', { execute: vi.fn(async () => aborted(stage, checkId)) });
+      await runTicks(h, appConfig('dry-run', {}, oneEach), 2);
+
+      expect(h.of('executions')[0]).toMatchObject({ step: 'result', backoff: null });
+      expect(h.memo.isBackedOff(putKey, NOW_SEC + 60)).toBe(false);
+      expect(putQuotes(h, 2)).toHaveLength(1);
+      expect(h.deps.execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('backs a custom strike off too: the next tick quotes and executes K* without it', async () => {
+      // Calls only, at a 100 USD basis above every listed strike: the fallback quotes the custom strike (100) first
+      // and takes it (spec §8.6); its execution aborts on a guard.
+      const basis = {
+        ...wheelConfig().basis,
+        anchor: { ...wheelConfig().basis.anchor, basisE8: 100_00000000n },
+      };
+      const fallback = { ...wheelConfig().call.fallback, customStrikeFirst: true };
+      const config = appConfig(
+        'dry-run',
+        {},
+        { basis, put: { enabled: false }, call: { minApr: 0.1, fallback } },
+      );
+      const h = harness('dry-run', { execute: vi.fn(async () => aborted('guard', 'C18')) });
+      await runTicks(h, config, 2);
+
+      const customKey = keyOf('call', 100_00000000n, E1);
+      const kStarKey = keyOf('call', 8850000000n, E1);
+      const [first, second] = vi.mocked(h.deps.execute).mock.calls.map(([intent]) => intent.candidate.mode);
+      expect([first, second]).toEqual(['basis-fallback-custom', 'basis-fallback']);
+      expect(h.of('executions')[0]).toMatchObject({
+        step: 'result',
+        backoff: { key: customKey, n: 1, untilSec: NOW_SEC + 300 },
+      });
+      const callKeys = (tick: number) =>
+        h
+          .of('quotes')
+          .filter((q) => q.side === 'call' && q.tick === tick)
+          .map((q) => (q.instrument as { key: string }).key);
+      expect(callKeys(1)).toEqual([customKey, kStarKey]);
+      expect(callKeys(2)).toEqual([kStarKey]);
+      const call2 = h.of('decisions').find((d) => d.tick === 2 && d.side === 'call');
+      expect(planned(call2)).toEqual([customKey, kStarKey]);
+      expect(backedOff(call2)).toEqual([customKey]);
+    });
+
+    it('backs off a custom strike whose RFQ the server refuses', async () => {
+      // A fresh wallet's custom strike: the RFQ is refused for want of custom-strike volume (spec §1.2).
+      const basis = {
+        ...wheelConfig().basis,
+        anchor: { ...wheelConfig().basis.anchor, basisE8: 100_00000000n },
+      };
+      const fallback = { ...wheelConfig().call.fallback, customStrikeFirst: true };
+      const config = appConfig(
+        'dry-run',
+        {},
+        { basis, put: { enabled: false }, call: { minApr: 0.1, fallback } },
+      );
+      const refused = (c: Candidate): QuoteOutcome =>
+        c.mode === 'basis-fallback-custom'
+          ? { ok: false, error: 'rpc-error', message: 'custom strikes require volume', requestedAtMs: 0 }
+          : goodQuote(c, Date.now());
+      const h = harness('dry-run', { quote: vi.fn(async (c: Candidate) => refused(c)) });
+      await runTicks(h, config, 1);
+
+      expect(h.memo.isBackedOff(keyOf('call', 100_00000000n, E1), NOW_SEC + 60)).toBe(true);
+      expect(h.memo.keyBackoff.get(keyOf('call', 100_00000000n, E1))?.indicativeApr).toBeNull();
+    });
+  });
 });
 
 describe('runLoop: snapshot failures and shutdown', () => {
@@ -555,6 +713,64 @@ describe('runLoop: live', () => {
     expect(h.memo.cooldownUntilSec.put).toBe(NOW_SEC + 1800);
     expect(h.memo.simulatedDeploySec).toEqual({});
     expect(h.memo.inFlight).toBe(false);
+  });
+
+  it.each<[string, TradeResult]>([
+    ['filled', filled],
+    [
+      'unknown',
+      { status: 'unknown', reason: 'confirm-timeout', confirmSentAtSec: NOW_SEC, bookkeepingErrors: [] },
+    ],
+    ['reverted', { status: 'reverted', txHash: TX, bookkeepingErrors: [] }],
+    [
+      'confirm-rejected',
+      { status: 'aborted', stage: 'confirm-rejected', message: 'rejected', bookkeepingErrors: [] },
+    ],
+  ])('counts a %s result towards --max-trades: the confirm was sent', async (_name, result) => {
+    const h = harness('live', { execute: vi.fn(async () => result) });
+    await runLoop(h.deps, appConfig('live', { maxTrades: 1 }));
+    expect(h.deps.snapshot).toHaveBeenCalledOnce();
+    expect(vi.mocked(h.deps.status).mock.calls.at(-1)?.[0]).toMatchObject({
+      completed: 1,
+      lastTradeAtSec: NOW_SEC,
+    });
+  });
+
+  it.each<[string, TradeResult]>([
+    ['aborted at gas', { status: 'aborted', stage: 'gas', message: 'gas fee over bound' }],
+    ['aborted at precheck', { status: 'aborted', stage: 'precheck', message: 'stale state' }],
+  ])('does not count a result %s, before any confirm', async (_name, result) => {
+    const h = harness('live', { execute: vi.fn(async () => result) });
+    await runTicks(h, appConfig('live', { maxTrades: 1 }), 2);
+    expect(h.deps.snapshot).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(h.deps.status).mock.calls.at(-1)?.[0]).toMatchObject({
+      completed: 0,
+      lastTradeAtSec: null,
+    });
+  });
+
+  it('stops at --max-trades even when the status derivation after the execution throws', async () => {
+    const h = harness('live', {
+      execute: vi.fn(async () => {
+        // The next snapshotMemo() is the post-execution STATUS derivation's.
+        const original = h.memo.snapshotMemo.bind(h.memo);
+        h.memo.snapshotMemo = () => {
+          h.memo.snapshotMemo = original;
+          throw new Error('derivation failed');
+        };
+        return filled;
+      }),
+    });
+    await runTicks(h, appConfig('live', { maxTrades: 1 }), 3);
+
+    expect(h.deps.execute).toHaveBeenCalledOnce();
+    // The loop returned after the first tick instead of failing it and ticking on.
+    expect(h.deps.snapshot).toHaveBeenCalledOnce();
+    expect(h.deps.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      'could not derive or write STATUS.json',
+    );
+    expect(h.deps.log.error).not.toHaveBeenCalledWith(expect.anything(), 'tick failed; holding');
   });
 
   it("applies a fill's cooldown before the next tick plans: the side holds 'cooldown'", async () => {

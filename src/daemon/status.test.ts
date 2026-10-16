@@ -10,8 +10,11 @@ const STATUS: StatusFile = {
   holdReasons: { put: 'interval', call: 'basis-unreliable' },
   halted: false,
   lastTradeAtSec: 1_792_190_000,
+  completed: 1,
   tick: 42,
   mode: 'dry-run',
+  frontendSha: 'f00dcafe',
+  frontendChanged: false,
 };
 const ISO_LINE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z /;
 
@@ -102,5 +105,27 @@ describe('STOP file', () => {
 
     expect(existsSync(join(dataDir, 'STOP'))).toBe(true);
     expect(stopFilePresent(dataDir)).toBe(true);
+  });
+
+  it('writes the reason on one line, whitespace collapsed and at most 500 characters long', () => {
+    const dataDir = tempDir();
+    // RFQ error text is server-controlled and reaches the reason.
+    writeStopFile(dataDir, 'RFQ refused:\n  forbidden\r\n\tin   your region ');
+    writeStopFile(dataDir, `long ${'x'.repeat(1_000)}`);
+
+    const [first, second, end] = readFileSync(join(dataDir, 'STOP'), 'utf8').split('\n');
+    expect(first?.replace(ISO_LINE, '')).toBe('RFQ refused: forbidden in your region');
+    expect(second?.replace(ISO_LINE, '')).toBe(`long ${'x'.repeat(495)}`);
+    expect(end).toBe('');
+  });
+
+  it('is treated as present when its path cannot be checked (fail closed)', () => {
+    // A path component longer than the file system allows: stat fails with ENAMETOOLONG, not ENOENT.
+    const unreadable = join(tempDir(), 'x'.repeat(300));
+    expect(stopFilePresent(unreadable)).toBe(true);
+    // Below a regular file (ENOTDIR) there is no STOP: that is absence, not an error.
+    const file = join(tempDir(), 'a-file');
+    writeFileSync(file, '');
+    expect(stopFilePresent(file)).toBe(false);
   });
 });

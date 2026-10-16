@@ -141,7 +141,10 @@ export type Candidate = {
 /** One gate's outcome (spec §8.3); `detail` says why a gate failed. */
 export type GateResult = { id: string; pass: boolean; detail?: string };
 
-/** The first candidate filter (spec §8.6) a listing failed; `apr-prefilter` only when the prefilter was applied. */
+/**
+ * The first candidate filter (spec §8.6) a listing failed; `daily-limit` (C16's notional clause) in live only,
+ * `apr-prefilter` only when the prefilter was applied.
+ */
 export type ExclusionReason =
   | 'product'
   | 'tenor'
@@ -149,6 +152,7 @@ export type ExclusionReason =
   | 'basis'
   | 'size'
   | 'delta'
+  | 'daily-limit'
   | 'apr-prefilter';
 /** A listing of the side that the normal path's filters left out. */
 export type Exclusion = { strikeE8: bigint; expirySec: number; reason: ExclusionReason };
@@ -156,7 +160,8 @@ export type Exclusion = { strikeE8: bigint; expirySec: number; reason: Exclusion
 /**
  * Both kinds carry the side's gate results and the listings filtered out (`[]` when a gate holds, as no listing
  * was screened). `prefilterBypassed` is set when the APR prefilter would have removed every listing that passed
- * the other filters, so the best of them are quoted anyway (the floor applies to the real quotes).
+ * the other filters, so the best of them are quoted anyway (the floor applies to the real quotes). A quote plan's
+ * `detail` says why it departs from the usual path (a fallback strike K* that clears the basis, quoted as normal).
  */
 export type SidePlan =
   | {
@@ -174,6 +179,7 @@ export type SidePlan =
       gates: GateResult[];
       excluded: Exclusion[];
       prefilterBypassed: boolean;
+      detail?: string;
     };
 
 export type QuoteOutcome =

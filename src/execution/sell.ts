@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { type Address, type Hex, isAddressEqual, type TransactionReceipt } from 'viem';
+import { type Address, type Hex, isAddress, isAddressEqual, type TransactionReceipt } from 'viem';
 import { approveExact } from '../chain/erc20.ts';
 import { ADDRESSES, TOKENS, TRADED_PRODUCTS } from '../domain/constants.ts';
 import { uintOf } from '../domain/parse.ts';
@@ -57,6 +57,12 @@ type Signed = {
 type Confirmed = { txHash: Hex; counterBefore: bigint; attempt: Attempt };
 
 const SHUTDOWN = Symbol('shutdown');
+const MODES: readonly string[] = ['live', 'dry-run'];
+/**
+ * REQUOTE replaces a quote with less than `minQuoteTtlSec` plus this many seconds left, so that the quote still
+ * clears C6's `minQuoteTtlSec` after the gas POST and the second fresh state that follow the requote.
+ */
+export const REQUOTE_MARGIN_SEC = 10;
 
 /**
  * Sells `intent` (spec §7.1): PRECHECK → APPROVE → REQUOTE → GAS → CHECKS → [dry-run returns here] → SIGN →
@@ -108,12 +114,18 @@ async function beforeSend<T>(
 }
 
 /**
- * PRECHECK (C1–C2, before the approve transaction): not shutting down; in live, signing as the wallet with no
- * STOP file and the lock held; the side's pinned collateral in exactly the amount the request requires; and a
- * fresh state that holds no gate and still sizes the intent's tranche.
+ * PRECHECK (C1–C2, before the approve transaction): a known mode (anything but `live` or `dry-run` fails closed);
+ * not shutting down; in live, signing as the wallet with no STOP file and the lock held; a candidate whose strike,
+ * expiry and quantity are its request's, which names the wallet as the taker; the side's pinned collateral in
+ * exactly the amount the request requires; and a fresh state that holds no gate and still sizes the intent's
+ * tranche.
  */
 async function precheck(run: Run): Promise<Exit | undefined> {
   const { deps, intent } = run;
+  const mode: unknown = deps.mode;
+  if (typeof mode !== 'string' || !MODES.includes(mode)) {
+    return abort(run, 'precheck', `unknown mode '${messageOf(mode)}'`);
+  }
   if (deps.signal.aborted) return abort(run, 'precheck', 'shutdown');
   if (deps.mode === 'live' && (deps.signer === null || !isAddressEqual(deps.signer.address, run.self))) {
     return abort(
@@ -130,6 +142,10 @@ async function precheck(run: Run): Promise<Exit | undefined> {
       'precheck',
       `candidate side ${intent.candidate.side} differs from the intent's ${intent.side}`,
     );
+  }
+  const differs = requestMismatches(run);
+  if (differs.length > 0) {
+    return abort(run, 'precheck', `candidate differs from its request: ${differs.join(', ')}`);
   }
   const pinned = TRADED_PRODUCTS[intent.side].collateralAsset;
   if (!isAddressEqual(run.token, pinned)) {
@@ -159,6 +175,24 @@ async function precheck(run: Run): Promise<Exit | undefined> {
     );
   }
   return undefined;
+}
+
+/**
+ * Where the candidate departs from the request it quoted: the strike and quantity (wire strings, parsed strictly),
+ * the expiry, and a taker other than the wallet. The checklist reads both, so they must agree.
+ */
+function requestMismatches(run: Run): string[] {
+  const { candidate } = run.intent;
+  const { request } = candidate;
+  const differs: string[] = [];
+  if (uintOf(request.strike) !== candidate.strikeE8) differs.push('strike');
+  if (request.expiry !== candidate.expirySec) differs.push('expiry');
+  if (uintOf(request.quantity) !== candidate.quantityE18) differs.push('quantity');
+  const taker: unknown = request.taker;
+  const ours =
+    typeof taker === 'string' && isAddress(taker, { strict: false }) && isAddressEqual(taker, run.self);
+  if (!ours) differs.push('taker');
+  return differs;
 }
 
 /** What the request's strike and quantity lock: C13's computation, which the quoted body must match. */
@@ -205,14 +239,15 @@ async function approve(run: Run): Promise<Exit | undefined> {
 }
 
 /**
- * REQUOTE: a quote with less than `minQuoteTtlSec` left is replaced by one fresh quote for the same request
- * with us as the taker; the quote held here is the only one ever signed. Below `minPriceE18` it aborts.
+ * REQUOTE: a quote with less than `minQuoteTtlSec + REQUOTE_MARGIN_SEC` left is replaced by one fresh quote for
+ * the same request with us as the taker; the quote held here is the only one ever signed. Below `minPriceE18` it
+ * aborts.
  */
 async function requote(run: Run): Promise<Quote | Exit> {
   const { deps, intent } = run;
   const ttlSec = intent.quote.validUntil - deps.clock.serverNowSec();
   let quote = intent.quote;
-  if (ttlSec < deps.checks.minQuoteTtlSec) {
+  if (ttlSec < deps.checks.minQuoteTtlSec + REQUOTE_MARGIN_SEC) {
     const request = { ...intent.candidate.request, taker: run.self };
     const result = await deps.quotes.requestQuote(request, {
       timeoutMs: deps.timeouts.requoteMs,
@@ -583,6 +618,14 @@ function unknown(run: Run, attempt: Attempt, reason: UnknownReason, txHash?: Hex
   });
 }
 
+/**
+ * An error's message for a record or a result. Never throws, so it is safe inside every `catch`: a value whose
+ * conversion to a string throws (an object without a prototype, a throwing getter) reads as a placeholder.
+ */
 function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? String(error.message) : String(error);
+  } catch {
+    return 'unprintable error';
+  }
 }

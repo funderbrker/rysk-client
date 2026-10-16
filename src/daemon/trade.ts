@@ -7,6 +7,7 @@ import type { ExecutionConfig } from '../execution/checks.ts';
 import type { FreshState } from '../execution/types.ts';
 import type { WheelConfig } from '../strategy/wheel/config.ts';
 import {
+  ALL_LISTED_MAX_TENOR_DAYS,
   basisEligible,
   checkGates,
   deriveState,
@@ -18,21 +19,15 @@ import type { Snapshot } from '../strategy/wheel/types.ts';
 // What `sellOption` reads from the strategy: the checklist's configuration for a side, and the side's state
 // recomputed from a fresh snapshot (spec §7.1 PRECHECK, §7.2 C2 and later).
 
-/**
- * The longest tenor check C11 accepts for a call under `fallback.scope: 'all-listed'`, which lets the planner take a
- * far-dated listing above the basis on the normal path (the strategy lifts the window's upper bound for it); C10's
- * listing check still applies.
- */
-export const ALL_LISTED_MAX_TENOR_DAYS = 366;
-
 /** The instrument being executed: the fresh state sizes the tranche at its strike and lists its expiry's strikes. */
 export type ExecutedInstrument = { side: Side; strikeE8: bigint; expirySec: number };
 
 /**
  * The pre-sign checklist's configuration for `side`: the safety block, the side's limits, and the trade sizes and
  * strike precision of `asset` (the WHYPE asset). A call's fallback floor applies to calls only (C3 refuses a fallback
- * put); under `fallback.scope: 'all-listed'` a call's maximum tenor is `ALL_LISTED_MAX_TENOR_DAYS` (or the configured
- * one, if longer).
+ * put); under `fallback.scope: 'all-listed'` a call's maximum tenor is the strategy's `ALL_LISTED_MAX_TENOR_DAYS` (or
+ * the configured one, if longer), the bound the planner applies, so a far-dated listing above the basis that the
+ * planner takes on the normal path passes C11; C10's listing check still applies.
  */
 export function executionConfig(side: Side, c: WheelConfig, asset: Asset): ExecutionConfig {
   const limits = c[side];

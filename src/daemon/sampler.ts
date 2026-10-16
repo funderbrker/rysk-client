@@ -12,6 +12,7 @@ import type { RyskTaker } from '../rysk/taker.ts';
 import type { TokenBucket } from './bucket.ts';
 import type { SamplerConfig } from './config.ts';
 import type { Log } from './logger.ts';
+import { backoffKeyOf } from './memo.ts';
 import type { Recorder, RecordStream } from './recorder.ts';
 import { type SampleContext, type SampleOutcome, sampleQuoteRecord } from './records.ts';
 
@@ -51,6 +52,22 @@ type Purpose = SampleContext['purpose'];
 /** A sampler stream: a run, then `delayMs` of sleep, until aborted. */
 type Stream = { name: string; delayMs: number; needsListings: boolean; run: (run: number) => Promise<void> };
 
+/** What the inventory stream compares: each listing's products by instrument key, each cap's limit by name and type. */
+type InventoryContent = {
+  hash: string;
+  listed: Map<string, string>;
+  limits: Map<string, Pick<Cap, 'name' | 'type' | 'capE18'>>;
+};
+
+/** The last inventory record's content, and when the last full one (`first` or `interval`) was written. */
+type InventoryState = { content: InventoryContent; fullAtMs: number };
+
+/** How one RFQ of a group went: sent (whatever its outcome), skipped as de-listed, or stopped by the abort. */
+type Sent = 'sent' | 'unlisted' | 'aborted';
+
+/** A sweep's legs so far: RFQs sent, and legs skipped because their instrument was no longer listed. */
+type SweepTally = { sent: number; skippedUnlisted: number };
+
 /** What the streams share across runs. */
 type Sampler = {
   deps: SamplerDeps;
@@ -62,8 +79,8 @@ type Sampler = {
   pinned: Listing[];
   /** The cap names (lowercase) the inventory stream records: GLOBAL, HYPE and the sampled tokens'. */
   hypeCapNames: Set<string>;
-  /** The last inventory record's content hash and when it was taken. */
-  inventory: { contentHash: string; recordedAtMs: number } | null;
+  /** The last inventory record's content; `null` before the first. */
+  inventory: InventoryState | null;
   /** The end of the last public-fills window read (startup at first), and the fill hashes recorded (oldest first). */
   fills: { lastToSec: number; seen: Set<string> };
 };
@@ -124,12 +141,15 @@ export function pickPinned(listings: Listing[], n = 4): Listing[] {
  * The research sampler (spec §9.2): one fixed-delay loop per stream whose `*EveryMin` is not 0, until `signal`
  * aborts. The RFQ streams (sweep, pinned, taker pair) and the inventory snapshot first wait for listings.
  *
- * - sweep: `buildSweep` over the live listings, every `sweepEveryMin` after the last sweep ended;
+ * - sweep: `buildSweep` over the live listings, every `sweepEveryMin` after the last sweep ended; a leg whose
+ *   instrument is no longer listed when its turn comes is skipped (no RFQ, no token), and a finished sweep writes
+ *   one `sweep-summary` record to `quotes` with its legs, the RFQs sent and the legs skipped;
  * - pinned: `pickPinned`'s instruments in the traded products, kept for their lifetime (quoted as custom strikes once
  *   de-listed) and re-picked once they expire;
  * - taker pair: the first pinned instrument from `self` and from the zero address, back to back;
- * - inventory: the latest listings and the HYPE caps as parsed, first, when what is listed or a cap limit changes
- *   (checked every minute) and otherwise every `inventoryEveryMin`;
+ * - inventory: the latest listings and the HYPE caps as parsed, first and every `inventoryEveryMin` after the last
+ *   full record; in between, checked every minute, a `changed` record with only the difference (instrument keys
+ *   added and removed, products changed, cap limits changed) when what is listed or a cap limit changes;
  * - public fills: `publicHistory` since the last window (overlapping it; the first since startup), one record per fill
  *   new to this run.
  *
@@ -191,16 +211,25 @@ async function schedule(sampler: Sampler, stream: Stream): Promise<void> {
   }
 }
 
+/**
+ * One sweep, built from the listings at its start. At 6 RFQ a minute it lasts about 25 minutes while the listed
+ * strikes change about every minute, so each leg is sent only while its instrument is still listed: an unlisted one
+ * is a custom strike, which the server refuses for the zero taker. A sweep that finishes records its tally.
+ */
 async function sweep(sampler: Sampler, run: number): Promise<void> {
   const { deps, cfg, random } = sampler;
   const listings = liveListings(deps);
   const requests = buildSweep(listings, cfg, SAMPLE_QUANTITY_E18, random);
+  const tally: SweepTally = { sent: 0, skippedUnlisted: 0 };
   for (const group of byInstrument(requests)) {
     if (deps.signal.aborted) return;
-    await quoteGroup(sampler, 'sweep', run, group);
+    await quoteGroup(sampler, 'sweep', run, group, tally);
   }
+  if (deps.signal.aborted) return;
+  record(deps, 'quotes', { purpose: 'sweep-summary', run, legs: requests.length, ...tally });
 }
 
+/** The pinned instruments, listed or not (a de-listed one is quoted as a custom strike). */
 async function pinnedRun(sampler: Sampler, run: number): Promise<void> {
   for (const listing of currentPinned(sampler)) {
     if (sampler.deps.signal.aborted) return;
@@ -225,14 +254,18 @@ function currentPinned(sampler: Sampler): Listing[] {
   return sampler.pinned;
 }
 
-/** Queues `requests` to be sent back to back after every group queued before; settles when they are done. */
+/**
+ * Queues `requests` to be sent back to back after every group queued before; settles when they are done. With a
+ * `tally` (the sweep), a request whose instrument is no longer listed is skipped and counted there.
+ */
 function quoteGroup(
   sampler: Sampler,
   purpose: Purpose,
   run: number,
   requests: QuoteRequest[],
+  tally?: SweepTally,
 ): Promise<void> {
-  const done = sampler.rfqTail.then(() => sendEach(sampler, purpose, run, requests));
+  const done = sampler.rfqTail.then(() => sendEach(sampler, purpose, run, requests, tally));
   sampler.rfqTail = done.catch(() => {});
   return done;
 }
@@ -242,26 +275,35 @@ async function sendEach(
   purpose: Purpose,
   run: number,
   requests: QuoteRequest[],
+  tally: SweepTally | undefined,
 ): Promise<void> {
   for (const request of requests) {
-    if (!(await sendOne(sampler, purpose, run, request))) return;
+    const sent = await sendOne(sampler, purpose, run, request, tally !== undefined);
+    if (sent === 'aborted') return;
+    if (tally !== undefined) {
+      if (sent === 'sent') tally.sent += 1;
+      else tally.skippedUnlisted += 1;
+    }
   }
 }
 
 /**
  * Waits until no trade is executing and the bucket grants a token, then sends one RFQ and records it with the market
- * as the latest listings show it. False once aborted (an RFQ aborted in flight is not recorded).
+ * as the latest listings show it. With `onlyListed`, a request whose instrument the latest listings no longer hold
+ * is skipped before it takes a token. `aborted` once aborted (an RFQ aborted in flight is not recorded).
  */
 async function sendOne(
   sampler: Sampler,
   purpose: Purpose,
   run: number,
   request: QuoteRequest,
-): Promise<boolean> {
+  onlyListed: boolean,
+): Promise<Sent> {
   const { deps, cfg } = sampler;
   for (;;) {
-    if (deps.signal.aborted) return false;
+    if (deps.signal.aborted) return 'aborted';
     if (deps.isExecuting()) await pause(deps, POLL_MS);
+    else if (onlyListed && !deps.listings().some((l) => sameInstrument(l, request))) return 'unlisted';
     else if (deps.bucket.take()) break;
     else await pause(deps, Math.max(1, deps.bucket.waitMs()));
   }
@@ -270,12 +312,13 @@ async function sendOne(
   const listings = deps.listings();
   const [latest] = listings;
   const assetSpotE8 = deps.spotE8?.() ?? null;
+  const indexSpotE8 = latest === undefined ? null : indexSpotE8Of(latest);
   const ctx: SampleContext = {
     purpose,
     run,
     nowSec: Math.floor(sentAtMs / 1000),
-    spotE8: assetSpotE8 ?? (latest === undefined ? null : indexSpotE8Of(latest)),
-    spotSource: assetSpotE8 === null ? 'index' : 'asset',
+    spotE8: assetSpotE8 ?? indexSpotE8,
+    spotSource: assetSpotE8 !== null ? 'asset' : indexSpotE8 !== null ? 'index' : 'none',
     inventoryTs: latest?.observedAtSec ?? null,
     listing: listings.find((l) => sameInstrument(l, request)),
   };
@@ -289,37 +332,51 @@ async function sendOne(
       ? { ...result, makerSigOk: await makerSignatureOk(result.quote, deps.recoverMaker) }
       : result;
   } catch (error) {
-    if (deps.signal.aborted) return false;
+    if (deps.signal.aborted) return 'aborted';
     outcome = { ok: false, error: 'rpc-error', message: messageOf(error), requestedAtMs: sentAtMs };
   }
   record(deps, 'quotes', sampleQuoteRecord(request, outcome, ctx));
-  return true;
+  return 'sent';
 }
 
 /**
- * Reads the caps and records them (the HYPE ones) with the latest listings on the first check, when the content
- * changed since the last record, or once `intervalMs` has passed since it. The content is what is listed (each
- * listing's side, strike, expiry and products) and each cap's limit: delta, APR, index and cap usage move all the time
- * and are recorded but not compared. A failed caps read throws, so the check is skipped (and logged) and the next one
- * tries again.
+ * Reads the caps (the HYPE ones) and compares them and the latest listings with the last record. A full record (the
+ * listings and caps as parsed) is written on the first check and once `intervalMs` has passed since the last full
+ * one; in between, a change of content writes a `changed` record with only the difference from the last record. The
+ * content is what is listed (each listing's side, strike, expiry and products) and each cap's limit: delta, APR,
+ * index and cap usage move all the time and are recorded in full records but never compared. A failed caps read
+ * throws, so the check is skipped (and logged) and the next one tries again.
  */
 async function inventoryCheck(sampler: Sampler, intervalMs: number): Promise<void> {
   const { deps } = sampler;
   const listings = deps.listings();
   const parsed = parseCaps(await deps.rest.caps());
   const caps = parsed.caps.filter((cap) => sampler.hypeCapNames.has(cap.name.toLowerCase()));
-  const contentHash = inventoryHash(listings, caps);
+  const content = inventoryContent(listings, caps);
   const nowMs = deps.clock.nowMs();
   const last = sampler.inventory;
-  let trigger: 'first' | 'changed' | 'interval';
-  if (last === null) trigger = 'first';
-  else if (last.contentHash !== contentHash) trigger = 'changed';
-  else if (nowMs - last.recordedAtMs >= intervalMs) trigger = 'interval';
-  else return;
   const inventoryTs = listings[0]?.observedAtSec ?? null;
-  const body = { trigger, contentHash, inventoryTs, listings, caps, droppedCaps: parsed.dropped };
-  record(deps, 'inventory', body);
-  sampler.inventory = { contentHash, recordedAtMs: nowMs };
+  const contentHash = content.hash;
+  if (last === null || nowMs - last.fullAtMs >= intervalMs) {
+    const trigger = last === null ? 'first' : 'interval';
+    record(deps, 'inventory', {
+      trigger,
+      contentHash,
+      inventoryTs,
+      listings,
+      caps,
+      droppedCaps: parsed.dropped,
+    });
+    sampler.inventory = { content, fullAtMs: nowMs };
+  } else if (last.content.hash !== contentHash) {
+    record(deps, 'inventory', {
+      trigger: 'changed',
+      contentHash,
+      inventoryTs,
+      ...inventoryDiff(last.content, content),
+    });
+    sampler.inventory = { content, fullAtMs: last.fullAtMs };
+  }
 }
 
 /**
@@ -462,19 +519,51 @@ function hypeCapNames(tokens: Address[]): Set<string> {
 }
 
 /**
- * A hash of what is listed and the cap limits, independent of order and casing: each listing's side, strike, expiry
- * and products, and each cap's name, type and limit. Delta, APR, index, observation time and cap usage are left out.
+ * What is listed and the cap limits, independent of order and casing, and a hash of it: each listing's products by
+ * its instrument key (`side|strikeE8|expirySec`), and each cap's limit by its name and type. Delta, APR, index,
+ * observation time and cap usage are left out.
  */
-function inventoryHash(listings: Listing[], caps: Cap[]): string {
-  const listed = listings.map((l) => {
+function inventoryContent(listings: Listing[], caps: Cap[]): InventoryContent {
+  const listed = new Map<string, string>();
+  for (const l of listings) {
     const products = l.products
       .map((p) => [p.underlying, p.strikeAsset, p.collateralAsset, p.isPut].join('/').toLowerCase())
       .sort();
-    return JSON.stringify([l.isPut, l.strikeE8.toString(), l.expirySec, products]);
+    listed.set(backoffKeyOf(l.isPut ? 'put' : 'call', l.strikeE8, l.expirySec), JSON.stringify(products));
+  }
+  const limits = new Map<string, Pick<Cap, 'name' | 'type' | 'capE18'>>();
+  for (const { name, type, capE18 } of caps)
+    limits.set(`${name.toLowerCase()}|${type}`, { name, type, capE18 });
+  const lines = [
+    ...[...listed].map(([key, products]) => `${key} ${products}`).sort(),
+    '--',
+    ...[...limits].map(([id, cap]) => `${id} ${cap.capE18}`).sort(),
+  ];
+  return { hash: createHash('sha256').update(lines.join('\n')).digest('hex').slice(0, 16), listed, limits };
+}
+
+/**
+ * What changed from `before` to `after`: the instrument keys added and removed, the keys still listed whose products
+ * changed, and each cap whose limit changed (`capE18` `null` when it went away, `previousCapE18` `null` when new).
+ */
+function inventoryDiff(before: InventoryContent, after: InventoryContent) {
+  const sorted = (keys: Iterable<string>): string[] => [...keys].sort();
+  const added = sorted([...after.listed.keys()].filter((key) => !before.listed.has(key)));
+  const removed = sorted([...before.listed.keys()].filter((key) => !after.listed.has(key)));
+  const productsChanged = sorted(
+    [...after.listed]
+      .filter(([key, p]) => before.listed.has(key) && before.listed.get(key) !== p)
+      .map(([key]) => key),
+  );
+  const capsChanged = sorted(new Set([...before.limits.keys(), ...after.limits.keys()])).flatMap((id) => {
+    const previous = before.limits.get(id);
+    const current = after.limits.get(id);
+    const cap = current ?? previous;
+    if (cap === undefined || previous?.capE18 === current?.capE18) return [];
+    const { name, type } = cap;
+    return [{ name, type, capE18: current?.capE18 ?? null, previousCapE18: previous?.capE18 ?? null }];
   });
-  const limits = caps.map((c) => JSON.stringify([c.name.toLowerCase(), c.type, c.capE18.toString()]));
-  const content = [...listed.sort(), '--', ...limits.sort()].join('\n');
-  return createHash('sha256').update(content).digest('hex').slice(0, 16);
+  return { added, removed, productsChanged, capsChanged };
 }
 
 /** HYPE spot from a listing's index price, through its 8-decimal string; `null` when it is not a positive price. */

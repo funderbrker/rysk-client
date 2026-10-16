@@ -27,6 +27,8 @@ const BACKOFF_BASE_MS = 100;
 const BACKOFF_FACTOR = 5;
 const BACKOFF_CAP_MS = 5_000;
 const EXCEEDS_PREMIUM = /gas fee more than premium/i;
+/** The most of a response body an error message keeps: an HTML error page or a long echo is noise in the logs. */
+const MAX_BODY_CHARS = 300;
 
 // `/api/gas` echoes the request plus `gasFee` (6-dp USD); `""` or absent means zero.
 const gasResponse = z.looseObject({ gasFee: z.optional(z.string().regex(/^[0-9]*$/)) });
@@ -56,6 +58,11 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/** `text`, or its first 300 characters marked with the full length. */
+function excerpt(text: string): string {
+  return text.length <= MAX_BODY_CHARS ? text : `${text.slice(0, MAX_BODY_CHARS)}… (${text.length} chars)`;
+}
+
 function parseJson(response: HttpResult): unknown {
   try {
     return JSON.parse(response.text);
@@ -66,7 +73,8 @@ function parseJson(response: HttpResult): unknown {
 
 /**
  * Rysk V12 REST API. GET methods return the raw parsed JSON for the domain parsers to type; `gasFee`
- * returns a `GasResult`. Network errors and 5xx are retried with backoff; 4xx and timeouts never are.
+ * returns a `GasResult`. Network errors and 5xx are retried with backoff; 4xx and timeouts never are. An error
+ * message carries at most the first 300 characters of the response body.
  */
 export class RyskRest {
   readonly #baseUrl: URL;
@@ -113,7 +121,7 @@ export class RyskRest {
     });
     if (!response.ok) {
       const reason = EXCEEDS_PREMIUM.test(response.text) ? 'exceeds-premium' : 'http';
-      return { ok: false, reason, status: response.status, message: response.text };
+      return { ok: false, reason, status: response.status, message: excerpt(response.text) };
     }
     const json = parseJson(response);
     if (!isObject(json)) throw new RestError(response.status, 'gas response is not an object');
@@ -128,7 +136,7 @@ export class RyskRest {
 
   async #getJson(path: string, query: Record<string, string> = {}): Promise<unknown> {
     const response = await this.#request(path, { method: 'GET' }, query);
-    if (!response.ok) throw new RestError(response.status, response.text);
+    if (!response.ok) throw new RestError(response.status, excerpt(response.text));
     return parseJson(response);
   }
 

@@ -395,8 +395,8 @@ the shared types, Appendix B the config). Protocol facts: `docs/rysk-protocol.md
   `signConfirmation` then viem `verifyTypedData({ address, domain: EIP712_DOMAIN, types: CONFIRMATION_TYPES,
   primaryType: 'Confirmation', message, signature })` is `true`; `hashConfirmation` is stable across two calls and
   changes when `gasFee6` changes; `recoverQuoteSigner` on each of the three spike quotes returns a valid address.
-- [ ] **Step 2: Run the recovery against the spike makers** (`0x66799bc69d7a7daaf50b6aa03cd5c6a2df1a9454`,
-  `0xf7f97e0b45c230d209d0a721414ff7abfcacae80`, `0x403426e707fcc907d17b96ab2e4ddf7962040233`). If a recovered address
+- [ ] **Step 2: Run the recovery against the spike makers** (the three makers in
+  `test/fixtures/spike-capture.json`). If a recovered address
   equals its maker, pin that equality in the test (it validates the pinned domain). If none match, pin only
   "returns a valid address" and add one line under Open questions in `docs/rysk-protocol.md` stating the observed
   recovered addresses did not match (makers may sign via contracts).
@@ -424,7 +424,8 @@ the shared types, Appendix B the config). Protocol facts: `docs/rysk-protocol.md
   (all `''` except `isPremium: false`; `gasFee`, `signature`, `isEIP1271` exempt); `echoMismatches(sent: ConfirmBody,
   echoed: Record<string, unknown>): string[]` (field names, by kind: address/uint/bool/hex; missing = mismatch;
   unknown extra key → `'extra:<key>'`; wrong extra value → `'extra-value:<key>'`); `parseGasFee(echoed): bigint | null`
-  (`''`/missing → `0n`; non-`/^\d+$/` → null).
+  (`''`/missing → `0n`; non-`/^\d+$/` → null). *(Note: `parseGasFee` was removed in the final fix wave; the fee's
+  one source is `GasResult.gasFee6`.)*
 - Produces (`body.ts`): `buildConfirmBody(a: { quote: Quote; taker: Address; collateralAmount: bigint; nonceMs: number }): ConfirmBody`
   (`quantity`/`strike` from the quote, `quoteValidUntil = validUntil = quote.validUntil`, `isTakerBuy: false`);
   `gasPreviewBody(quote: Quote): GasPreviewBody` (exactly 9 keys); `buildConfirmParams(body: ConfirmBody, echoed, gasFee6, signature): ConfirmParams`
@@ -433,7 +434,8 @@ the shared types, Appendix B the config). Protocol facts: `docs/rysk-protocol.md
 - [ ] **Step 1: Write failing `echo.test.ts`** on `spike-capture.json` (`gas.full.sent` as `sent`, parsed `gas.full.body` as `echoed`):
   `echoMismatches(sent, echoed)` is `[]`; `echoed.price = '1'` → `['price']`; `echoed.taker` uppercased → `[]`;
   `delete echoed.nonce` → `['nonce']`; `echoed.foo = 1` → `['extra:foo']`; `echoed.isPremium = true` → `['extra-value:isPremium']`;
-  `parseGasFee({ gasFee: '0' }) === 0n`, `parseGasFee({}) === 0n`, `parseGasFee({ gasFee: '1.5' }) === null`.
+  `parseGasFee({ gasFee: '0' }) === 0n`, `parseGasFee({}) === 0n`, `parseGasFee({ gasFee: '1.5' }) === null`
+  *(removed with `parseGasFee` in the final fix wave)*.
 - [ ] **Step 2: Write failing `body.test.ts`**: `buildConfirmBody` from the spike put quote with `collateralAmount 1950000000n`
   equals `gas.full.sent` except `nonce` and `taker`; `Object.keys(gasPreviewBody(quote)).sort()` equals the 9 names;
   `buildConfirmParams` output has `gasFee '0'`, `isEIP1271 false`, our `signature`, and `isPremium false`.
@@ -833,3 +835,33 @@ the shared types, Appendix B the config). Protocol facts: `docs/rysk-protocol.md
   Record any protocol surprise in `docs/rysk-protocol.md`.
 - [ ] **Step 3: Run `pnpm check`** — PASS. **Step 4: Commit** `git commit -m "Add README, production notes and dry-run validation results"`.
 - [ ] **Step 5: Push** `git push -u origin staging`.
+
+## Final fix wave (after the whole-branch review)
+
+Behaviour changed after Tasks 1–27; the task steps above are kept as written, and the spec and README describe the
+result.
+
+- **Tasks 1, 27 (fixtures, secrets, architecture test):** the fixtures' transaction hashes, block hash and block
+  number are fake (`0xfeed…`), the receipt's `logsBloom` is recomputed from its anonymized logs, and the protocol
+  doc's fill example is illustrative. `check-secrets.mjs` also flags a bare 64-hex run and fails on any unreadable
+  file; `.gitignore` adds `config.*.json` (but `config.example.json`), `*.key`, `*.pem` and `.env.*`. The
+  architecture test fails on an empty guarded directory, on clock, randomness, timer and `process` use, and on
+  `lib` imports other than `json.ts` and type-only `time.ts`.
+- **Tasks 2, 5, 9, 11, 12, 27 (domain, rysk):** `parsePositions` de-duplicates other rows by key; `Fill` and
+  `normalizeV` are gone (unused); REST error messages keep at most 300 characters of the body; the taker requires an
+  integer `validUntil` and a 65-byte hex signature (`mismatch` otherwise); the live smoke test runs only with
+  `RYSK_LIVE_TESTS=1`, re-reads the inventory right before its RFQ and skips on a custom-strike refusal.
+- **Task 22 (config, logger):** `safety.maxFeePerGasGwei` and `safety.unknownMaxWaitSec` must be positive;
+  `sampler.putStables` takes only USDC, USDT0 and USDH, `sampler.callCollaterals` only WHYPE, kHYPE, LHYPE and
+  wstHYPE; the redactor also replaces `new URL(rpcUrl).href` and the URL's path and query.
+- **Task 23 (status):** `STATUS.json` adds `completed`, `frontendSha` and `frontendChanged`; a STOP reason is one
+  line of at most 500 characters; `stopFilePresent` fails closed.
+- **Task 24 (loop):** `--max-trades` counts every live result whose confirm was sent (`filled`, `unknown`,
+  `reverted`, `confirm-rejected`); an execution aborted before the confirm at `requote`, `price-floor`, `gas` or a
+  guard other than C2 and C10 backs its listed key off; the result record carries `execId` and `backoff`; STATUS is
+  rewritten after each execution.
+- **Task 25 (sampler):** sweep legs whose instrument is no longer listed are skipped and counted in a
+  `sweep-summary` record; inventory `changed` records carry only the difference; `spotSource: 'none'` when no spot
+  is known.
+- **Tasks 24, 26 (wiring):** one redacting recorder serves the loop, `sellOption` and the sampler; `codeRev` is
+  `git describe --always --dirty`.

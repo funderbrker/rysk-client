@@ -54,6 +54,16 @@ describe('buildConfirmParams', () => {
     expect(params.isPremium).toBe(false);
   });
 
+  it('spreads the echoed extras first and our body over them', () => {
+    // A body field the echo also carries as an extra keeps our value.
+    const body = { ...sent, vaultId: 'ours' } as ConfirmBody;
+    const params = buildConfirmParams(body, { ...echoed, vaultId: 'echoed' }, 0n, SIGNATURE);
+
+    expect(params.vaultId).toBe('ours');
+    const keys = Object.keys(params);
+    expect(keys.indexOf('fees')).toBeLessThan(keys.indexOf('assetAddress'));
+  });
+
   it('takes only allowlisted extras from the echo', () => {
     const params = buildConfirmParams(sent, { ...echoed, price: '1', foo: 1, gasFee: '9' }, 7n, SIGNATURE);
 

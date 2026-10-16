@@ -3,6 +3,11 @@ dist/
 coverage/
 keystore/
 config.json
+config.*.json
+!config.example.json
 data/
 *.password
+*.key
+*.pem
 .env
+.env.*

@@ -14,7 +14,7 @@ import { premium6 } from '../domain/units.ts';
 import type { ConfirmationMessage } from '../rysk/eip712.ts';
 import type { ConfirmReply } from '../rysk/taker.ts';
 import type { ExecutionConfig } from './checks.ts';
-import { sellOption } from './sell.ts';
+import { REQUOTE_MARGIN_SEC, sellOption } from './sell.ts';
 import type { ExecutionEvent, FreshState, TradeDeps, TradeIntent } from './types.ts';
 
 type SpikeRequest = { request: QuoteRequest; reply: { result: Quote } };
@@ -543,6 +543,62 @@ describe('sellOption', () => {
         message: 'rpc down',
       });
     });
+
+    it('resolves, never rejects, when a failure cannot be printed', async () => {
+      const { deps } = fakes();
+      deps.freshState.mockRejectedValueOnce(Object.create(null));
+
+      await expect(sellOption(deps, intent())).resolves.toEqual({
+        status: 'aborted',
+        stage: 'precheck',
+        message: 'unprintable error',
+      });
+    });
+
+    it.each<[string, (i: TradeIntent) => void, string]>([
+      ['a strike other than the request’s', (i) => (i.candidate.strikeE8 = 7900000000n), 'strike'],
+      ['an expiry other than the request’s', (i) => (i.candidate.expirySec += 1), 'expiry'],
+      ['a quantity other than the request’s', (i) => (i.candidate.quantityE18 = 50n * E18), 'quantity'],
+      [
+        'a request strike that is not a decimal uint string',
+        (i) => (i.candidate.request = { ...i.candidate.request, strike: '78e8' }),
+        'strike',
+      ],
+      [
+        'a request taker other than the wallet',
+        (i) => (i.candidate.request = { ...i.candidate.request, taker: getAddress(QUOTE.maker) }),
+        'taker',
+      ],
+    ])('aborts before reading anything on %s', async (_, mutate, field) => {
+      const { deps } = fakes();
+      const wrong = intent();
+      mutate(wrong);
+
+      expect(await sellOption(deps, wrong)).toEqual({
+        status: 'aborted',
+        stage: 'precheck',
+        message: `candidate differs from its request: ${field}`,
+      });
+      expect(deps.freshState).not.toHaveBeenCalled();
+      expect(deps.collateral.approve).not.toHaveBeenCalled();
+    });
+
+    it.each(['dry-run', 'live'] as const)(
+      'fails closed on a mode other than live or dry-run (%s fakes)',
+      async (mode) => {
+        const { deps } = fakes(mode);
+        const unknown = { ...deps, mode: 'paper' as unknown as TradeDeps['mode'] };
+
+        expect(await sellOption(unknown, intent())).toEqual({
+          status: 'aborted',
+          stage: 'precheck',
+          message: "unknown mode 'paper'",
+        });
+        expect(deps.freshState).not.toHaveBeenCalled();
+        expect(deps.collateral.allowance).not.toHaveBeenCalled();
+        expect(deps.collateral.approve).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('APPROVE', () => {
@@ -570,6 +626,25 @@ describe('sellOption', () => {
   });
 
   describe('REQUOTE', () => {
+    it('re-quotes a quote with less than minQuoteTtlSec + REQUOTE_MARGIN_SEC left, and keeps one with that much', async () => {
+      expect(REQUOTE_MARGIN_SEC).toBe(10);
+      const threshold = config().minQuoteTtlSec + REQUOTE_MARGIN_SEC;
+
+      const short = fakes();
+      const shortHeld = { ...intent(), quote: { ...QUOTE, validUntil: SERVER_NOW_SEC + threshold - 1 } };
+      expect(await sellOption(short.deps, shortHeld)).toMatchObject({ status: 'filled', quote: QUOTE });
+      expect(short.deps.quotes.requestQuote).toHaveBeenCalledOnce();
+      expect(eventAt(short.deps, 'requote').detail).toMatchObject({ ttlSec: threshold - 1, requoted: true });
+
+      const enough = fakes();
+      const held = { ...QUOTE, validUntil: SERVER_NOW_SEC + threshold };
+      expect(await sellOption(enough.deps, { ...intent(), quote: held })).toMatchObject({
+        status: 'filled',
+        quote: held,
+      });
+      expect(enough.deps.quotes.requestQuote).not.toHaveBeenCalled();
+    });
+
     it('aborts at the price floor without signing', async () => {
       const { deps, signConfirmation } = fakes();
       const cheaper = { ...QUOTE, price: String(BigInt(QUOTE.price) - 1n) };
@@ -1035,6 +1110,20 @@ describe('sellOption', () => {
         bookkeepingErrors: ['writeStop: EACCES: permission denied'],
       });
       expect(eventAt(deps, 'stop').detail).toEqual({ reason: 'fill verification failed: premium-transfer' });
+    });
+
+    it('lists a STOP failure whose error cannot be printed instead of throwing', async () => {
+      const { deps } = fakes();
+      deps.verifyReceipt.mockReturnValueOnce({ ok: false, problems: ['premium-transfer'] });
+      deps.writeStop.mockImplementationOnce(() => {
+        throw Object.create(null);
+      });
+
+      expect(await sellOption(deps, intent())).toMatchObject({
+        status: 'unknown',
+        reason: 'verify-failed',
+        bookkeepingErrors: ['writeStop: unprintable error'],
+      });
     });
   });
 

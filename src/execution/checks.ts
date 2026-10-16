@@ -1,6 +1,12 @@
 import { type Address, isAddress, isAddressEqual, zeroAddress } from 'viem';
 import { aprFraction, aprFractionFromRyskApy, collateral6For } from '../domain/apr.ts';
-import { ADDRESSES, CHAIN_ID, TOKENS } from '../domain/constants.ts';
+import {
+  ADDRESSES,
+  CHAIN_ID,
+  STRIKE_BAND_MAX_BPS,
+  STRIKE_BAND_MIN_BPS,
+  TOKENS,
+} from '../domain/constants.ts';
 import { uintOf } from '../domain/parse.ts';
 import type { ConfirmBody, Quote } from '../domain/types.ts';
 import { collateralForCall, collateralForPut, premium6 } from '../domain/units.ts';
@@ -79,6 +85,7 @@ type Check = (ctx: CheckContext) => Outcome;
 
 const E8 = 10n ** 8n;
 const E18 = 10n ** 18n;
+const BPS = 10_000n;
 const PPM = 1_000_000n;
 const NONCE_SKEW_MS = 5000;
 const MAX_FRESH_STATE_AGE_MS = 10_000;
@@ -291,7 +298,10 @@ function c8(ctx: CheckContext): Outcome {
   return PASS;
 }
 
-/** C9: the gas echo is exactly our body plus the known extras, and the gas fee is within both limits. */
+/**
+ * C9: the gas echo is exactly our body plus the known extras, and the gas fee is within its limits: `maxGasFeeBps`
+ * of the premium, `maxGasFee6`, and the intent's `maxGasFee6` (the decision's bound).
+ */
 function c9(ctx: CheckContext): Outcome {
   const { config, gasFee6 } = ctx;
   const mismatches = echoMismatches(ctx.body, ctx.echoed);
@@ -302,12 +312,15 @@ function c9(ctx: CheckContext): Outcome {
     return fail(`gas fee ${gasFee6} above ${config.maxGasFeeBps} bps of premium ${premium}`);
   }
   if (gasFee6 > config.maxGasFee6) return fail(`gas fee ${gasFee6} above ${config.maxGasFee6}`);
+  const intended = ctx.intent.maxGasFee6;
+  if (gasFee6 > intended) return fail(`gas fee ${gasFee6} above the intent's ${intended}`);
   return PASS;
 }
 
 /**
- * C10: the strike sits in the OTM band around fresh spot, on the strike grid, and is listed (unless custom) in
- * listings at most 5 min old.
+ * C10: the strike sits in the OTM band around fresh spot (`STRIKE_BAND_MIN_BPS` for puts, `STRIKE_BAND_MAX_BPS` for
+ * calls, the band the planner also applies), on the strike grid, and is listed (unless custom) in listings at most
+ * 5 min old.
  */
 function c10(ctx: CheckContext): Outcome {
   const { fresh, config } = ctx;
@@ -316,8 +329,8 @@ function c10(ctx: CheckContext): Outcome {
   const otm = ppm(config.minOtmPct, 'minOtmPct');
   const inBand =
     ctx.intent.side === 'put'
-      ? strikeE8 * 10n >= spotE8 * 6n && strikeE8 * PPM <= spotE8 * (PPM - otm)
-      : strikeE8 * PPM >= spotE8 * (PPM + otm) && strikeE8 * 10n <= spotE8 * 14n;
+      ? strikeE8 * BPS >= spotE8 * STRIKE_BAND_MIN_BPS && strikeE8 * PPM <= spotE8 * (PPM - otm)
+      : strikeE8 * PPM >= spotE8 * (PPM + otm) && strikeE8 * BPS <= spotE8 * STRIKE_BAND_MAX_BPS;
   if (!inBand) return fail(`${ctx.intent.side} strike ${strikeE8} outside the band around spot ${spotE8}`);
   if (config.strikePrecisionE8 <= 0n || strikeE8 % config.strikePrecisionE8 !== 0n) {
     return fail(`strike ${strikeE8} not a multiple of ${config.strikePrecisionE8}`);
@@ -460,24 +473,36 @@ function c17(ctx: CheckContext): Outcome {
   return PASS;
 }
 
-/** C18 (calls): a reliable basis, and the strike clears it (normal) or is still the fallback strike. */
+/**
+ * C18 (calls): a reliable, defined basis, and the strike clears it (normal), or the fresh eligible set is still
+ * empty and the strike is the fresh K* below the basis threshold (`basis-fallback`) or the candidate's custom strike
+ * above the fresh K* (`basis-fallback-custom`).
+ */
 function c18(ctx: CheckContext): Outcome {
   if (ctx.intent.side === 'put') return notApplicable('calls only');
   const { fresh, config } = ctx;
   if (!fresh.basisReliable) return fail('basis is unreliable');
+  if (fresh.basisE8 === null) return fail('basis is undefined');
   const strikeE8 = uint(ctx.body.strike, 'body strike');
+  const margin = ppm(config.minStrikeOverBasisPct, 'minStrikeOverBasisPct');
+  const clearsBasis = strikeE8 * PPM >= fresh.basisE8 * (PPM + margin);
+  const threshold = `basis ${fresh.basisE8} × (1 + ${config.minStrikeOverBasisPct})`;
   const mode = modeOf(ctx);
-  if (mode === 'normal') {
-    if (fresh.basisE8 === null) return fail('basis is undefined');
-    const margin = ppm(config.minStrikeOverBasisPct, 'minStrikeOverBasisPct');
-    if (strikeE8 * PPM < fresh.basisE8 * (PPM + margin)) {
-      return fail(`strike ${strikeE8} below basis ${fresh.basisE8} × (1 + ${config.minStrikeOverBasisPct})`);
-    }
+  if (mode === 'normal') return clearsBasis ? PASS : fail(`strike ${strikeE8} below ${threshold}`);
+  if (!fresh.basisEligibleEmpty) return fail('strikes above the basis are listed again');
+  const kStarE8 = fresh.freshFallbackStrikeE8;
+  if (kStarE8 === null) return fail('no fresh fallback strike');
+  if (mode === 'basis-fallback') {
+    if (strikeE8 !== kStarE8) return fail(`strike ${strikeE8} is not the fresh fallback strike ${kStarE8}`);
+    if (clearsBasis) return fail(`fallback strike ${strikeE8} clears ${threshold}: not a fallback`);
     return PASS;
   }
-  if (!fresh.basisEligibleEmpty) return fail('strikes above the basis are listed again');
-  const expected = mode === 'basis-fallback' ? fresh.freshFallbackStrikeE8 : ctx.intent.candidate.strikeE8;
-  if (strikeE8 !== expected) return fail(`strike ${strikeE8} is not the ${mode} strike ${expected}`);
+  if (strikeE8 !== ctx.intent.candidate.strikeE8) {
+    return fail(`strike ${strikeE8} is not the custom strike ${ctx.intent.candidate.strikeE8}`);
+  }
+  if (!(strikeE8 > kStarE8)) {
+    return fail(`custom strike ${strikeE8} not above the fresh fallback strike ${kStarE8}`);
+  }
   return PASS;
 }
 

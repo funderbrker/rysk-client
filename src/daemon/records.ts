@@ -46,9 +46,12 @@ export type SampleContext = {
   run: number;
   /** Local seconds when the RFQ was sent: the tenor and APR are counted from it. */
   nowSec: number;
-  /** HYPE spot: the daemon's WHYPE asset price (`asset`), else the latest listings' index (`index`); `null` without. */
+  /**
+   * HYPE spot: the daemon's WHYPE asset price (`asset`), else the latest listings' index (`index`); `null` with
+   * `spotSource: 'none'` when neither is known.
+   */
   spotE8: bigint | null;
-  spotSource: 'asset' | 'index';
+  spotSource: 'asset' | 'index' | 'none';
   inventoryTs: number | null;
   /** The instrument's current listing; `undefined` once it is de-listed (a pinned instrument as a custom strike). */
   listing: Listing | undefined;
@@ -252,7 +255,7 @@ export function decisionRecord(
     plan:
       plan.kind === 'hold'
         ? { kind: 'hold', reason: plan.reason, detail: plan.detail }
-        : { kind: 'quote', prefilterBypassed: plan.prefilterBypassed },
+        : { kind: 'quote', prefilterBypassed: plan.prefilterBypassed, detail: plan.detail },
     candidates: plan.kind === 'quote' ? plan.candidates.map(candidateSummary) : [],
     excluded: plan.excluded,
     quotes: quoted.map(({ candidate, outcome }) =>

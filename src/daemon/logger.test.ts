@@ -107,6 +107,55 @@ describe('createLogger: level', () => {
   });
 });
 
+describe('createLogger: provider URL forms', () => {
+  function linesFor(rpcUrl: string, text: string): string {
+    const lines: string[] = [];
+    const log = createLogger({
+      level: 'info',
+      rpcUrl,
+      destination: { write: (line) => void lines.push(line) },
+    });
+    log.warn(text);
+    return (JSON.parse(lines[0] ?? '{}') as { msg: string }).msg;
+  }
+
+  it('redacts an Infura-style /v3/<key> path wherever it appears, and the normalized URL', () => {
+    const infura = 'https://mainnet.infura.io/v3/0123456789abcdef0123456789abcdef';
+    const key = '0123456789abcdef0123456789abcdef';
+    expect(linesFor(infura, `POST ${infura} failed`)).toBe('POST <rpc> failed');
+    // Another host (a redirect, a proxy) with the same key path.
+    expect(linesFor(infura, `via https://proxy.example/v3/${key}?x=1`)).toBe(
+      'via https://proxy.example<rpc>?x=1',
+    );
+    expect(linesFor(infura, 'https://mainnet.infura.io/v3/other is fine')).toContain('/v3/other');
+  });
+
+  it('redacts a QuickNode-style /<token>/ URL, also as its normalized href and its path alone', () => {
+    const token = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0';
+    const quicknode = `https://example.hype-mainnet.quiknode.pro/${token}/evm`;
+    // `new URL()` writes an upper-case host lower-case: the configured string and its href differ.
+    const configured = `https://EXAMPLE.hype-mainnet.quiknode.pro/${token}/evm`;
+    expect(linesFor(configured, `fetch ${quicknode} failed`)).toBe('fetch <rpc> failed');
+    expect(linesFor(configured, `path /${token}/evm refused`)).toBe('path <rpc> refused');
+    expect(linesFor(configured, 'fetch https://example.org/ failed')).toBe(
+      'fetch https://example.org/ failed',
+    );
+  });
+
+  it('adds nothing for a URL without a path: the bare host is no secret', () => {
+    expect(linesFor('https://rpc.hyperliquid.xyz', 'GET https://rpc.hyperliquid.xyz/ and /evm')).toBe(
+      'GET <rpc> and /evm',
+    );
+  });
+
+  it('redacts a plain path such as the public /evm only as part of the URL', () => {
+    const publicRpc = 'https://rpc.hyperliquid.xyz/evm';
+    expect(linesFor(publicRpc, `POST ${publicRpc} failed; see /evm and /api/evm/status`)).toBe(
+      'POST <rpc> failed; see /evm and /api/evm/status',
+    );
+  });
+});
+
 describe('redactRecord', () => {
   it('redacts the RPC URL and key segments at any depth and keeps the rest of the record', () => {
     const record = {

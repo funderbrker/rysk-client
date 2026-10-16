@@ -7,7 +7,8 @@ export type Listing = {
   expirySec: number;
   isPut: boolean;
   delta: number;
-  indicativeApr: number /* fraction */;
+  /** The inventory's indicative APR as a fraction (`0.37` = 37 %); the wire's `apy` percent is converted at parse. */
+  indicativeApr: number;
   indexUsd: number;
   products: Product[];
   observedAtSec: number;
@@ -53,6 +54,7 @@ export type Quote = {
   signature: Hex;
   usd: Address;
   collateralAsset: Address;
+  /** The maker's APR for this quote as the wire sends it: a PERCENT (`75.33` = 75.33 %), not a fraction. */
   apy: number;
 };
 export type ConfirmBody = {
@@ -98,23 +100,6 @@ export type Position = {
   txHash: Hex;
   status: 'open' | 'settled' | 'unknown';
   settlement: Settlement | null;
-};
-export type Fill = {
-  txHash: Hex;
-  chainId: number;
-  underlying: Address;
-  symbol: string;
-  isPut: boolean;
-  strikeE8: bigint;
-  expirySec: number;
-  quantityE18: bigint;
-  priceE18: bigint;
-  premium6: bigint;
-  aprRysk: number;
-  usd: Address;
-  collateral: Address;
-  makerFee6: bigint;
-  createdAtSec: number;
 };
 
 /** The app's 9-field gas preview body (spec §7.4); the full `ConfirmBody` is used only when selling. */

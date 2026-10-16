@@ -1,6 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { fixtureAssets } from '../../test/helpers/wheelSnapshot.ts';
 import { loadAccount } from '../chain/keystore.ts';
 import { ADDRESSES, TOKENS } from '../domain/constants.ts';
@@ -37,6 +39,18 @@ function config(scope: 'window' | 'all-listed', live = false): AppConfig {
 
 function wire(cfg: AppConfig, extra: Partial<Parameters<typeof wireDaemon>[1]> = {}) {
   return wireDaemon(cfg, { account: null, log, signal: new AbortController().signal, ...extra });
+}
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+/** Every line written under `<dataDir>/<stream>/`. */
+function linesOf(dataDir: string, stream: string): string[] {
+  const dir = join(dataDir, stream);
+  return readdirSync(dir).flatMap((file) => readFileSync(join(dir, file), 'utf8').trim().split('\n'));
 }
 
 describe('wireDaemon', () => {
@@ -96,6 +110,35 @@ describe('wireDaemon', () => {
     expect(memo.lastConfirmSec.put).toBeUndefined();
   });
 
+  it("redacts the RPC URL from every record through one recorder: the loop's, sellOption's and the sampler's", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'rysk-wire-'));
+    tempDirs.push(dataDir);
+    const rpcUrl = 'https://rpc.example.org/evm/0123456789abcdefKEY';
+    const cfg = { ...config('window'), dataDir, rpcUrl };
+    const wired = wire(cfg);
+    expect(wired.samplerDeps.recorder).toBe(wired.loopDeps.recorder);
+
+    wired.loopDeps.recorder.append('decisions', { detail: `upstream ${rpcUrl} refused` });
+    wired.samplerDeps.recorder.append('quotes', {
+      message: `via https://proxy.example/evm/0123456789abcdefKEY`,
+    });
+    wired.tradeDeps(PUT, ASSET).record({ execId: 'e1', step: 'gas', detail: { error: `${rpcUrl}/x` } });
+
+    const lines = [
+      ...linesOf(dataDir, 'decisions'),
+      ...linesOf(dataDir, 'quotes'),
+      ...linesOf(dataDir, 'executions'),
+    ];
+    expect(lines).toHaveLength(3);
+    expect(lines.join('\n')).not.toContain('0123456789abcdefKEY');
+    expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({
+      kind: 'decisions',
+      detail: 'upstream <rpc> refused',
+    });
+    expect(JSON.parse(lines[1] ?? '{}')).toMatchObject({ message: 'via https://proxy.example<rpc>' });
+    expect(JSON.parse(lines[2] ?? '{}')).toMatchObject({ execId: 'e1', detail: { error: '<rpc>/x' } });
+  });
+
   it('signs in live as the configured account only, and needs the lock held', () => {
     const cfg = config('window', true);
     const account = loadAccount(KEYSTORE_PATH, 'hunter2');
@@ -123,7 +166,8 @@ describe('the record envelope', () => {
     expect(configHashOf(readFileSync(EXAMPLE_PATH))).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  it('names the checkout revision', () => {
-    expect(codeRevision()).toMatch(/^([0-9a-f]{4,40}|unknown)$/);
+  it('names the checkout revision, marked when the working tree has changes', () => {
+    // `git describe --always --dirty`: a short sha or a tag description, `-dirty` with uncommitted changes.
+    expect(codeRevision()).toMatch(/^([0-9A-Za-z._/-]*[0-9a-f]{4,40}(-dirty)?|unknown)$/);
   });
 });

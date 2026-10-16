@@ -2,6 +2,7 @@
 export type { BasisEvent, BasisResult, BasisUnreliableReason } from './basis.ts';
 export { basisEvents, computeBasis } from './basis.ts';
 export {
+  ALL_LISTED_MAX_TENOR_DAYS,
   basisEligible,
   CUSTOM_STRIKE_PRECISION_E8,
   customFallbackStrikeE8,

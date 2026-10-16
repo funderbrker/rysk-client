@@ -13,8 +13,11 @@ export type KeyBackoff = {
   n: number;
   /** Spot at the last backoff: a move of more than 2 % from it resets the key. */
   spotE8: bigint;
-  /** The listing's indicative APR at the last backoff: a rise of more than 25 % resets the key. */
-  indicativeApr: number;
+  /**
+   * The listing's indicative APR at the last backoff: a rise of more than 25 % resets the key. `null` for a custom
+   * strike, which has no listing: only a spot move resets it.
+   */
+  indicativeApr: number | null;
 };
 
 /** The terms an `unknown` result traded, matched against new positions while it waits for evidence. */
@@ -40,7 +43,7 @@ const BACKOFF_CAP_SEC = 3600;
 const SPOT_RESET_DIVISOR = 50n;
 const APR_RESET_RATIO = 1.25;
 
-/** The backoff key of a listing: `side|strikeE8|expirySec`. */
+/** The backoff key of an instrument, listed or a custom strike: `side|strikeE8|expirySec`. */
 export function backoffKeyOf(side: Side, strikeE8: bigint, expirySec: number): string {
   return `${side}|${strikeE8}|${expirySec}`;
 }
@@ -93,7 +96,7 @@ export class Memo implements SnapshotMemo {
   }
 
   /** Backs `key` off once more: the n-th time for `min(3600, 300 × 2^(n−1))` s from `nowSec`. */
-  backoffKey(key: string, nowSec: number, spotE8: bigint, indicativeApr: number): void {
+  backoffKey(key: string, nowSec: number, spotE8: bigint, indicativeApr: number | null): void {
     const n = (this.keyBackoff.get(key)?.n ?? 0) + 1;
     const delaySec = Math.min(BACKOFF_CAP_SEC, BACKOFF_BASE_SEC * 2 ** (n - 1));
     this.keyBackoff.set(key, { untilSec: nowSec + delaySec, n, spotE8, indicativeApr });
@@ -106,20 +109,23 @@ export class Memo implements SnapshotMemo {
 
   /**
    * Forgets `key`'s backoff, count included, when spot moved more than 2 % from the spot at its backoff or its
-   * indicative APR rose more than 25 %; returns whether it did.
+   * indicative APR rose more than 25 % (never for a custom strike, which has none); returns whether it did.
    */
-  resetBackoffIf(key: string, spotE8: bigint, indicativeApr: number): boolean {
+  resetBackoffIf(key: string, spotE8: bigint, indicativeApr: number | null): boolean {
     const entry = this.keyBackoff.get(key);
     if (entry === undefined) return false;
     const moveE8 = spotE8 > entry.spotE8 ? spotE8 - entry.spotE8 : entry.spotE8 - spotE8;
     const spotMoved = moveE8 * SPOT_RESET_DIVISOR > entry.spotE8;
-    const aprRose = indicativeApr > entry.indicativeApr * APR_RESET_RATIO;
+    const aprRose =
+      indicativeApr !== null &&
+      entry.indicativeApr !== null &&
+      indicativeApr > entry.indicativeApr * APR_RESET_RATIO;
     if (!spotMoved && !aprRose) return false;
     this.keyBackoff.delete(key);
     return true;
   }
 
-  /** Drops the backoffs of listings that have expired, so the map does not grow for the process lifetime. */
+  /** Drops the backoffs of instruments that have expired, so the map does not grow for the process lifetime. */
   forgetExpiredKeys(nowSec: number): void {
     for (const key of this.keyBackoff.keys()) {
       const expirySec = Number(key.slice(key.lastIndexOf('|') + 1));

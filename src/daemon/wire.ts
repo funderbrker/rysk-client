@@ -13,7 +13,7 @@ import { hypeAsset } from '../domain/inventory.ts';
 import type { Asset, Quote } from '../domain/types.ts';
 import { gasPreviewBody } from '../execution/body.ts';
 import { sellOption } from '../execution/sell.ts';
-import type { TradeDeps } from '../execution/types.ts';
+import type { ExecutionEvent, TradeDeps } from '../execution/types.ts';
 import { sleep } from '../lib/time.ts';
 import {
   type ConfirmationMessage,
@@ -81,9 +81,13 @@ const GIT_TIMEOUT_MS = 2_000;
  * - Executions are serialized by the loop (`memo.inFlight`), so no other execution is ever in flight
  *   (`guards.inFlightExcludingSelf` is false) and the fresh state evaluates gate G8 without the running one.
  * - The execution's re-quote goes straight to the strategy taker and takes no token, from the strategy bucket or the
- *   shared hard cap: waiting for one would spend the quote's TTL. There is at most one per execution and one execution
- *   a tick, and the config keeps `strategyRfqPerMin + samplerRfqPerMin` at most 18, so the sustained total stays
- *   under the 20-a-minute hard cap.
+ *   shared hard cap: waiting for one would spend the quote's TTL. There is at most one per execution, and executions
+ *   are few: they run one at a time, each after its own RFQ round trip and gas preview; a side whose confirm was sent
+ *   cools down (60 s after a refusal or revert, else until the fill or other evidence shows), and one that aborted
+ *   before the confirm backs its key off. With the config keeping `strategyRfqPerMin + samplerRfqPerMin` at most 18,
+ *   the 2 a minute left under the 20-a-minute hard cap cover the re-quotes.
+ * - Every record (the loop's, `sellOption`'s and the sampler's) goes through one redacting recorder, which replaces
+ *   the RPC URL and provider keys with `<rpc>` (`redactRecord`).
  */
 export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   const { log, signal } = opts;
@@ -131,9 +135,9 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
     codeRev: opts.codeRev ?? 'unknown',
     configHash: opts.configHash ?? 'unknown',
   };
-  const recorder = new Recorder({ dataDir, envelope, clock });
-  const redactedRecorder = {
-    append: (stream: RecordStream, body: object) => recorder.append(stream, redactRecord(body, rpcUrl)),
+  const fileRecorder = new Recorder({ dataDir, envelope, clock });
+  const recorder: Pick<Recorder, 'append'> = {
+    append: (stream: RecordStream, body: object) => fileRecorder.append(stream, redactRecord(body, rpcUrl)),
   };
 
   const version = new FrontendVersionWatcher({
@@ -205,7 +209,7 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
     collateral: { ...approveDeps, vaultCounter },
     signer,
     clock,
-    record: (event) => recorder.append('executions', redactRecord(event, rpcUrl)),
+    record: (event) => recorder.append('executions', event),
     checks: executionConfig(target.side, c, asset),
     verifyReceipt: verifyFillReceipt,
     writeStop: (reason) => writeStopFile(dataDir, reason),
@@ -241,15 +245,17 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   const loopDeps: LoopDeps = {
     snapshot,
     quote,
-    execute: (intent) => {
+    execute: (intent, onExecId) => {
       if (latest === null) throw new Error('no snapshot yet to size the checklist from');
-      return sellOption(tradeDeps(intent.candidate, hypeAsset(latest.market.assets)), intent);
+      const deps = tradeDeps(intent.candidate, hypeAsset(latest.market.assets));
+      return sellOption({ ...deps, record: reportingExecId(deps.record, onExecId) }, intent);
     },
     vaultCounter,
     recorder,
     status: (status) => writeStatus(dataDir, status),
     stopFile: () => stopFilePresent(dataDir),
     frontendChanged: () => version.changed,
+    frontendSha: () => version.sha,
     writeStop: (reason) => writeStopFile(dataDir, reason),
     clock,
     log: log.child({ component: 'loop' }),
@@ -261,7 +267,7 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   const samplerDeps: SamplerDeps = {
     taker: samplerTaker,
     rest,
-    recorder: redactedRecorder,
+    recorder,
     bucket: samplerBucket,
     clock,
     sleep,
@@ -289,10 +295,13 @@ export function configHashOf(bytes: Uint8Array | string): string {
   return createHash('sha256').update(bytes).digest('hex').slice(0, HASH_HEX_CHARS);
 }
 
-/** `git rev-parse --short HEAD` of this checkout; `'unknown'` outside one, or when git takes over 2 s. */
+/**
+ * `git describe --always --dirty` of this checkout: the short sha (or the nearest tag), with `-dirty` when the
+ * working tree has uncommitted changes; `'unknown'` outside a checkout, or when git takes over 2 s.
+ */
 export function codeRevision(): string {
   try {
-    const rev = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+    const rev = execFileSync('git', ['describe', '--always', '--dirty'], {
       cwd: fileURLToPath(new URL('.', import.meta.url)),
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -302,6 +311,21 @@ export function codeRevision(): string {
   } catch {
     return 'unknown';
   }
+}
+
+/** `record`, first passing the execution's id to `onExecId` (once, on its first record). */
+function reportingExecId(
+  record: (event: ExecutionEvent) => void,
+  onExecId: ((execId: string) => void) | undefined,
+): (event: ExecutionEvent) => void {
+  let reported = false;
+  return (event) => {
+    if (!reported) {
+      reported = true;
+      onExecId?.(event.execId);
+    }
+    record(event);
+  };
 }
 
 /** Live trades as the configured account and nothing else. */

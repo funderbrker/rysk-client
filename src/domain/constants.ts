@@ -61,6 +61,13 @@ export const SAMPLED_CALL_COLLATERALS: Address[] = [
   TOKENS.WSTHYPE.address,
 ];
 
+/**
+ * Check C10's outer band around spot, in basis points of spot: a put strike at least 0.6 × spot, a call strike at
+ * most 1.4 × spot. The planner's moneyness filter and the custom fallback strike use the same band (spec §7.2, §8.6).
+ */
+export const STRIKE_BAND_MIN_BPS = 6_000n;
+export const STRIKE_BAND_MAX_BPS = 14_000n;
+
 /** $0.01 in 8-decimal strike units; used when an asset does not report its own strike precision. */
 export const DEFAULT_STRIKE_PRECISION_E8 = 1_000_000n;
 

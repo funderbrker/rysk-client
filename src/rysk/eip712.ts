@@ -173,12 +173,3 @@ export async function makerSignatureOk(
     return false;
   }
 }
-
-/** Maps a 65-byte signature's trailing `v` of 0/1 to 27/28; any other signature is returned unchanged. */
-export function normalizeV(sig: Hex): Hex {
-  if (sig.length !== 132) return sig;
-  const v = sig.slice(-2);
-  if (v === '00') return `0x${sig.slice(2, -2)}1b`;
-  if (v === '01') return `0x${sig.slice(2, -2)}1c`;
-  return sig;
-}

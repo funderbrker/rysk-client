@@ -111,10 +111,3 @@ export function echoMismatches(sent: ConfirmBody, echoed: Record<string, unknown
   }
   return mismatches;
 }
-
-/** The echoed 6-dp USD gas fee: `''` or missing is zero; `null` for anything but a decimal uint string. */
-export function parseGasFee(echoed: Record<string, unknown>): bigint | null {
-  const fee = echoed.gasFee;
-  if (fee === undefined || fee === '') return 0n;
-  return typeof fee === 'string' && UINT.test(fee) ? BigInt(fee) : null;
-}

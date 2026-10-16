@@ -33,17 +33,35 @@ const E20 = 10n ** 20n;
  * capital and the basis. A row that cannot be told apart from those (not an object, or neither a valid other
  * `chainId` nor a valid other `address`) throws too. Every other row is kept only as `{ chainId, key }` for the
  * vault-counter comparison; an invalid field there is a warning, and the row is still counted with that field's
- * raw value in its key.
+ * raw value in its key. Other rows are de-duplicated by key (the first copy kept, one warning per duplicated key),
+ * as `deriveState` does for positions: the chain counts vaults, and a repeated API row is not a second vault.
  */
 export function parsePositions(json: unknown, opts: PositionsOptions): ParsedPositions {
   if (!Array.isArray(json)) throw new PositionParseError('positions: top level is not an array');
   const parsed: ParsedPositions = { positions: [], otherRows: [], warnings: [] };
+  const others: OtherRow[] = [];
   json.forEach((row: unknown, index) => {
     if (!isObject(row)) throw new PositionParseError(`positions: row ${index} is not an object`);
     if (isOwnRow(row, index, opts)) parsed.positions.push(parsePosition(row, index, opts.chainId));
-    else parsed.otherRows.push(parseOtherRow(row, index, parsed.warnings));
+    else others.push(parseOtherRow(row, index, parsed.warnings));
   });
+  parsed.otherRows = uniqueByKey(others, parsed.warnings);
   return parsed;
+}
+
+/** The first row of each key, in input order, with one warning per key that more than one row shares. */
+function uniqueByKey(rows: OtherRow[], warnings: string[]): OtherRow[] {
+  const copies = new Map<string, number>();
+  const unique: OtherRow[] = [];
+  for (const row of rows) {
+    const seen = copies.get(row.key) ?? 0;
+    if (seen === 0) unique.push(row);
+    copies.set(row.key, seen + 1);
+  }
+  for (const [key, count] of copies) {
+    if (count > 1) warnings.push(`positions: ${count} rows share the key ${key}; counted once`);
+  }
+  return unique;
 }
 
 /**

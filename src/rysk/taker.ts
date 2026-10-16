@@ -1,4 +1,4 @@
-import { type Address, type Hex, isAddressEqual, isHex } from 'viem';
+import { type Address, type Hex, isAddressEqual } from 'viem';
 import { addressOf, isObject, UINT, uintOf } from '../domain/parse.ts';
 import type { ConfirmParams, Quote, QuoteRequest } from '../domain/types.ts';
 import { sleep } from '../lib/time.ts';
@@ -32,6 +32,8 @@ export type RyskTakerOptions = {
 };
 
 const TX_HASH = /^0x[0-9a-f]{64}$/i;
+/** A 65-byte ECDSA signature (`r`, `s`, `v`): what an EOA maker signs with and the confirm carries. */
+const SIGNATURE_65 = /^0x[0-9a-fA-F]{130}$/;
 const MAX_QUOTE_TTL_SEC = 3600;
 
 function sameAddress(wire: unknown, expected: Address): boolean {
@@ -63,20 +65,23 @@ function quotesRequest(req: QuoteRequest, result: unknown): boolean {
 }
 
 /**
- * The tradable quote in a reply `accept` matched, keeping the wire strings, or why it is a mismatch. The
- * fields `accept` checked are taken as they are.
+ * The tradable quote in a reply `accept` matched, keeping the wire strings, or why it is a mismatch: `validUntil`
+ * must be whole seconds within the next hour and the signature 65 bytes of hex. The fields `accept` checked are
+ * taken as they are.
  */
 function parseQuote(result: unknown, nowSec: number): Quote | string {
   if (!isObject(result)) return 'the reply is not an object';
   const { isTakerBuy, validUntil, maker, nonce, price, signature, apy } = result;
   if (isTakerBuy !== false) return `isTakerBuy is ${String(isTakerBuy)}, not false`;
+  if (!Number.isSafeInteger(validUntil)) return `validUntil ${String(validUntil)} is not whole seconds`;
   if (typeof validUntil !== 'number' || !(nowSec < validUntil && validUntil <= nowSec + MAX_QUOTE_TTL_SEC)) {
     return `validUntil ${String(validUntil)} is not within (${nowSec}, ${nowSec + MAX_QUOTE_TTL_SEC}]`;
   }
   if (addressOf(maker) === undefined) return `maker ${String(maker)} is not an address`;
   if (typeof nonce !== 'string' || !UINT.test(nonce)) return `nonce ${String(nonce)} is not a uint string`;
   if (typeof price !== 'string' || !UINT.test(price)) return `price ${String(price)} is not a uint string`;
-  if (typeof signature !== 'string' || !isHex(signature)) return 'signature is not hex';
+  if (typeof signature !== 'string' || !SIGNATURE_65.test(signature))
+    return 'signature is not 65 bytes of hex';
   if (typeof apy !== 'number' || !Number.isFinite(apy)) return `apy ${String(apy)} is not a number`;
   return {
     assetAddress: result.assetAddress as Address,
@@ -90,7 +95,7 @@ function parseQuote(result: unknown, nowSec: number): Quote | string {
     nonce,
     price,
     validUntil,
-    signature,
+    signature: signature as Hex,
     usd: result.usd as Address,
     collateralAsset: result.collateralAsset as Address,
     apy,

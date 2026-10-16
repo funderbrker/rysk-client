@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { type Address, isAddressEqual } from 'viem';
 import { describe, expect, it } from 'vitest';
-import { CHAIN_ID, TOKENS } from '../../domain/constants.ts';
+import { CHAIN_ID, TOKENS, TRADED_PRODUCTS } from '../../domain/constants.ts';
 import { parsePositions } from '../../domain/positions.ts';
 import type { Position } from '../../domain/types.ts';
 import { classifyRow, isBasisRelevant, isManaged } from './classify.ts';
@@ -113,6 +113,24 @@ describe('classifyRow on edited positions', () => {
       'whypePutOtherUsd',
     );
     expect(classifyRow({ ...managedPut, usd: TOKENS.USDH.address }, NOW_SEC).cls).toBe('whypePutOtherUsd');
+  });
+
+  it('classifies a row on each of TRADED_PRODUCTS as managed, and a row off them as not', () => {
+    for (const [side, cls] of [
+      ['put', 'managedPut'],
+      ['call', 'managedCall'],
+    ] as const) {
+      const product = TRADED_PRODUCTS[side];
+      const row: Position = {
+        ...(side === 'put' ? managedPut : openCall),
+        isPut: product.isPut,
+        underlying: product.underlying,
+        usd: product.strikeAsset,
+        collateral: product.collateralAsset,
+      };
+      expect(classifyRow(row, NOW_SEC).cls).toBe(cls);
+      expect(classifyRow({ ...row, usd: TOKENS.USDT0.address }, NOW_SEC).cls).not.toBe(cls);
+    }
   });
 
   it('compares addresses case-insensitively', () => {

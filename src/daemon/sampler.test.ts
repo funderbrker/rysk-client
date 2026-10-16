@@ -158,6 +158,11 @@ function isHypeCapName(name: string): boolean {
   );
 }
 
+/** The `quotes` records of RFQs (a finished sweep also writes a `sweep-summary` record there). */
+function rfqs(h: ReturnType<typeof harness>): Rec[] {
+  return h.of('quotes').filter((q) => q.purpose !== 'sweep-summary');
+}
+
 function keyOf(r: QuoteRequest): string {
   return `${r.isPut ? 'put' : 'call'}|${r.strike}|${r.expiry}`;
 }
@@ -281,8 +286,15 @@ describe('runSampler', () => {
     const h = harness();
     await runFor(h, { ...OFF, sweepEveryMin: 60 }, 30 * MINUTE_MS);
 
-    const quotes = h.of('quotes');
+    const quotes = rfqs(h);
     expect(quotes).toHaveLength(144);
+    expect(h.of('quotes').at(-1)).toEqual({
+      purpose: 'sweep-summary',
+      run: 1,
+      legs: 144,
+      sent: 144,
+      skippedUnlisted: 0,
+    });
     expect(quotes.every((q) => q.purpose === 'sweep' && q.run === 1 && q.takerKind === 'zero')).toBe(true);
     expect(quotes.every((q) => q.outcome === 'quote')).toBe(true);
     const legs = new Set(
@@ -379,6 +391,14 @@ describe('runSampler', () => {
     const none = harness({ spotE8: () => null });
     await runFor(none, { ...OFF, pinnedEveryMin: 5 }, 1_000);
     expect(none.of('quotes')[0]?.context).toMatchObject({ spotE8: 8147056124n, spotSource: 'index' });
+
+    // Neither: no asset price and an index that is not a price.
+    const neither = harness({ spotE8: () => null });
+    neither.setListings(fixtureListings().map((l) => ({ ...l, indexUsd: 0 })));
+    await runFor(neither, { ...OFF, pinnedEveryMin: 5 }, 1_000);
+    const [unpriced] = neither.of('quotes');
+    expect(unpriced?.context).toMatchObject({ spotE8: null, spotSource: 'none' });
+    expect(unpriced?.outcome).toBe('quote');
   });
 
   it('pauses a sweep mid-way while a trade executes and resumes it where it stopped', async () => {
@@ -414,7 +434,43 @@ describe('runSampler', () => {
     await vi.advanceTimersByTimeAsync(30 * MINUTE_MS);
     h.controller.abort();
     await done;
-    expect(h.of('quotes')).toHaveLength(144);
+    expect(rfqs(h)).toHaveLength(144);
+  });
+
+  it('skips the sweep legs whose instrument is no longer listed when their turn comes, without a token', async () => {
+    const h = harness();
+    const sweep = buildSweep(fixtureListings(), OFF, QTY_E18, () => 0.5);
+    // The last 5 instruments of the sweep are de-listed once the third RFQ is answered.
+    const delisted = new Set([...new Set(sweep.map(keyOf))].slice(-5));
+    const skipped = sweep.filter((r) => delisted.has(keyOf(r))).length;
+    h.requestQuote.mockImplementation(async (req) => {
+      const atMs = Date.now();
+      if (h.requestQuote.mock.calls.length === 3) {
+        h.setListings(
+          fixtureListings().filter(
+            (l) => !delisted.has(`${l.isPut ? 'put' : 'call'}|${l.strikeE8}|${l.expirySec}`),
+          ),
+        );
+      }
+      return { ok: true, quote: quoteFor(req, atMs), requestedAtMs: atMs, respondedAtMs: atMs };
+    });
+    await runFor(h, { ...OFF, sweepEveryMin: 60 }, 30 * MINUTE_MS);
+
+    const sent = h.requestQuote.mock.calls.map(([r]) => r);
+    expect(skipped).toBeGreaterThan(5);
+    expect(sent).toEqual(sweep.filter((r) => !delisted.has(keyOf(r))));
+    const quotes = rfqs(h);
+    expect(quotes.every((q) => q.instrument?.listed === true)).toBe(true);
+    // A skipped leg takes no token: the RFQs after the first 6 still go out one every 10 s.
+    const sentAtMs = quotes.map((q) => q.requestedAtMs as number);
+    expect((sentAtMs.at(-1) ?? 0) - NOW_SEC * 1000).toBe((144 - skipped - 6) * 10_000);
+    expect(h.of('quotes').at(-1)).toEqual({
+      purpose: 'sweep-summary',
+      run: 1,
+      legs: 144,
+      sent: 144 - skipped,
+      skippedUnlisted: skipped,
+    });
   });
 
   it('stops mid-sweep on abort', async () => {
@@ -468,7 +524,7 @@ describe('runSampler', () => {
     await runFor(h, DEFAULTS, 40 * MINUTE_MS);
 
     expect(maxInFlight).toBe(1);
-    const quotes = h.of('quotes');
+    const quotes = rfqs(h);
     const purposes = new Set(quotes.map((q) => q.purpose));
     expect(purposes).toEqual(new Set(['sweep', 'pinned', 'taker-pair']));
     expect(quotes.filter((q) => q.purpose === 'sweep')).toHaveLength(144);
@@ -569,7 +625,7 @@ describe('runSampler', () => {
     expect(unchecked.of('quotes').map((q) => q.makerSigOk)).toEqual([null, null, null, null]);
   });
 
-  it('records the listings and the HYPE caps first, then on a content change or once per interval', async () => {
+  it('records the listings and the HYPE caps in full first and every interval, and only the difference between', async () => {
     const h = harness();
     const done = runSampler(h.deps, { ...OFF, inventoryEveryMin: 5 });
     await vi.advanceTimersByTimeAsync(1_000);
@@ -580,6 +636,10 @@ describe('runSampler', () => {
     expect(hypeCaps).toHaveLength(21);
     expect(first?.caps).toEqual(hypeCaps);
     const triggers = (): unknown[] => h.of('inventory').map((r) => r.trigger);
+    const listingKey = (l: Listing): string => `${l.isPut ? 'put' : 'call'}|${l.strikeE8}|${l.expirySec}`;
+    const [gone, regrouped] = fixtureListings();
+    if (gone === undefined || regrouped === undefined) throw new Error('no fixture listings');
+    const hypeContracts = hypeCaps.find((c) => c.name === 'HYPE' && c.type === 'CONTRACTS');
 
     // Re-observed in another order with moved quotes and new usage: not a change (check at 1 min).
     h.setListings(
@@ -603,29 +663,72 @@ describe('runSampler', () => {
     await vi.advanceTimersByTimeAsync(MINUTE_MS);
     expect(triggers()).toEqual(['first']);
 
-    // The HYPE cap is raised: recorded at the next check (3 min).
+    // The HYPE cap is raised: a diff record at the next check (3 min), without the listings or caps.
     h.setCaps(capsWith('HYPE', 'CONTRACTS', { cap: '999000000000000000000000' }));
     await vi.advanceTimersByTimeAsync(MINUTE_MS);
     expect(triggers()).toEqual(['first', 'changed']);
-    const raisedCaps = (h.of('inventory')[1]?.caps ?? []) as Cap[];
-    const raised = raisedCaps.find((c) => c.name === 'HYPE' && c.type === 'CONTRACTS');
-    expect(raised?.capE18).toBe(999000000000000000000000n);
+    const raised = h.of('inventory')[1];
+    expect(raised).toEqual({
+      trigger: 'changed',
+      contentHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+      inventoryTs: NOW_SEC + 60,
+      added: [],
+      removed: [],
+      productsChanged: [],
+      capsChanged: [
+        {
+          name: 'HYPE',
+          type: 'CONTRACTS',
+          capE18: 999000000000000000000000n,
+          previousCapE18: hypeContracts?.capE18,
+        },
+      ],
+    });
+    expect(raised?.contentHash).not.toBe(first?.contentHash);
 
-    // Regenerated without one listing (4 min).
-    h.setListings(fixtureListings().slice(1));
+    // Regenerated without one listing and with another's products changed (4 min).
+    h.setListings(
+      fixtureListings()
+        .slice(1)
+        .map((l, i) => (i === 0 ? { ...l, products: l.products.slice(1) } : l)),
+    );
     await vi.advanceTimersByTimeAsync(MINUTE_MS);
     expect(triggers()).toEqual(['first', 'changed', 'changed']);
-    expect(h.of('inventory')[2]?.listings).toHaveLength(47);
+    expect(h.of('inventory')[2]).toMatchObject({
+      added: [],
+      removed: [listingKey(gone)],
+      productsChanged: [listingKey(regrouped)],
+      capsChanged: [],
+    });
+    expect(h.of('inventory')[2]).not.toHaveProperty('listings');
 
-    // Unchanged since: recorded again 5 min after the last record (9 min).
-    await vi.advanceTimersByTimeAsync(4 * MINUTE_MS);
-    expect(triggers()).toEqual(['first', 'changed', 'changed']);
+    // 5 min after the first full record: a full one again, whatever changed since.
     await vi.advanceTimersByTimeAsync(MINUTE_MS);
     expect(triggers()).toEqual(['first', 'changed', 'changed', 'interval']);
+    expect(h.of('inventory')[3]?.listings).toHaveLength(47);
+    const fullCaps = (h.of('inventory')[3]?.caps ?? []) as Cap[];
+    const hypeCap = fullCaps.find((c) => c.name === 'HYPE' && c.type === 'CONTRACTS');
+    expect(hypeCap?.capE18).toBe(999000000000000000000000n);
+
+    // The listing comes back, its neighbour's products too (6 min): the difference from the full record.
+    h.setListings(fixtureListings());
+    await vi.advanceTimersByTimeAsync(MINUTE_MS);
+    expect(h.of('inventory')[4]).toMatchObject({
+      trigger: 'changed',
+      added: [listingKey(gone)],
+      removed: [],
+      productsChanged: [listingKey(regrouped)],
+    });
+
+    // Unchanged since: nothing until 5 min after the last full record (10 min).
+    await vi.advanceTimersByTimeAsync(3 * MINUTE_MS);
+    expect(triggers()).toHaveLength(5);
+    await vi.advanceTimersByTimeAsync(MINUTE_MS);
+    expect(triggers()).toEqual(['first', 'changed', 'changed', 'interval', 'changed', 'interval']);
     h.controller.abort();
     await done;
-    // The caps are read at every check (0 to 9 min).
-    expect(h.deps.rest.caps).toHaveBeenCalledTimes(10);
+    // The caps are read at every check (0 to 10 min).
+    expect(h.deps.rest.caps).toHaveBeenCalledTimes(11);
     expect(h.requestQuote).not.toHaveBeenCalled();
   });
 

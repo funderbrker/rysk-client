@@ -10,7 +10,7 @@ Rysk publishes no taker API spec. Most of what follows was reverse-engineered fr
 |---|---|
 | `docs` | Official Rysk docs at docs.rysk.finance (read 2026-10-16) |
 | `bundle` | Reverse-engineered from the app.rysk.finance production JS bundle: Vercel deployment `dpl_FkTjweSkCa3qo6eh4iVWoEayUKpt`, commit `6b13834452f228d8e772f9f8d019f6eba8ae96d4` |
-| `live` | Observed live on 2026-10-16 through read-only REST GETs, read-only WS methods and public RPC reads. Nothing was signed or submitted during this research. |
+| `live` | Observed live on 2026-10-16 through read-only REST GETs, read-only WS methods and public RPC reads. Nothing was signed or submitted during this research. A later dry-run validation the same day added `request` RFQs, gas previews and full-body `/api/gas` calls from this repository's client; it signed nothing and never sent `confirm`. |
 | `inferred` | Our own reasoning from the sources above; not confirmed |
 | `hyperliquid` | HyperEVM chain facts from Hyperliquid's documentation |
 
@@ -64,12 +64,12 @@ Large numbers travel as **decimal strings**. Parse them to `bigint` and never ro
 | `quantity` | **e18 contracts**. 1 contract = 1 unit of underlying, whatever the token's decimals | RFQ, Quote, Confirmation, positions | `"25000000000000000000"` = 25 |
 | `strike` | **e8 USD** | RFQ, Quote, Confirmation | `"7850000000"` = $78.50 |
 | `strike` | **e18 USD** | positions, taker-history and history APIs | `"78500000000000000000"` = $78.50 |
-| `price` | e18 USD **per contract** | Quote, Confirmation, positions | `"1899452000000000000"` = $1.899452 |
-| `premium` | e18-scaled USD, **truncated to 6 dp** (the amount actually transferred) | positions, history | `"47486300000000000000"` |
+| `price` | e18 USD **per contract** | Quote, Confirmation, positions | `"1900000000000000000"` = $1.90 |
+| `premium` | e18-scaled USD, **truncated to 6 dp** (the amount actually transferred) | positions, history | `"47500000000000000000"` |
 | `income` | e18 USD, full precision (`quantity x price / 1e18`) | taker-history | `"35169380164060983000"` |
 | `collateralAmount` | call: collateral token base units; put: **6-dp stablecoin units** | Confirmation, approve | `"1962500000"` = 1962.5 USDC |
 | `gasFee` | 6-dp USD | `/api/gas`, Confirmation | `"0"` |
-| `fees` | 6-dp USD paid by the **maker** (`"0"` in user positions) | `/api/history` | `"5935787"` |
+| `fees` | 6-dp USD paid by the **maker** (`"0"` in user positions) | `/api/history` | `"5937500"` |
 | Expiry prices | **1e8 USD** strings; `"0"` = not published | `/api/expiry-prices` | `"8118577121"` = $81.18577121 |
 | `expiry`, `createdAt`, `validUntil` | unix **seconds** | everywhere | `1793347200` |
 | `auctionDeadline` | unix **milliseconds** | public RFQ channel | `1792143326721` |
@@ -77,7 +77,7 @@ Large numbers travel as **decimal strings**. Parse them to `bigint` and never ro
 | `quoteNonce` | maker's uint64 as a string | Quote `nonce` | |
 | Asset `price` | e18 USD (spot) | `assets` | `"81520940680000000000"` |
 | Caps `cap` / `usage` | e18 (contracts, or USD notional) | `caps`, `/api/products` | |
-| `apr` | percent string with 2 dp | positions | `"62.83"` |
+| `apr` | percent string with 2 dp | positions | `"63.15"` |
 | `apy` | percent number | inventory, Quote | `7.2167` |
 | oToken amounts | 8 decimals (Gamma convention) | on-chain only | `2500000000` = 25 |
 
@@ -141,6 +141,12 @@ This is the method enum from the bundle (module 70582). `live` marks methods ans
 `request` works with `taker = 0x0000000000000000000000000000000000000000` and returns a real, maker-signed best quote. The web app does exactly this for every visitor with no wallet connected, so the public RFQ stream is mostly price discovery. `bundle` `live`
 
 This makes zero-address RFQs fine for dry runs and quote recording. Before a live trade, though, re-request with the real taker address: the app does the same, because a change of taker triggers a fresh RFQ. The maker's `Quote` struct does not contain the taker (§9), but whether the server binds a quote to the requesting taker is unknown. `inferred`
+
+Observed from Node in the validation run. `live`
+- **Node works.** Node's built-in WebSocket (undici) works without an `Origin` header, cookies or any other header, both with the zero address and with a real taker. One sampler connection was dropped once with close code 1006 and reconnected; a sandbox proxy may explain it.
+- **Checksummed addresses.** The server accepts EIP-55 checksummed addresses in `request` (the app sends lowercase), and `/api/gas` echoes them in the form sent.
+- **Taker pricing.** One taker pair, the same instrument quoted for a real taker and for the zero address back to back, was priced by the same maker 0.000003 USD apart. That is one sample, not a rule.
+- **Custom strikes.** A strike that is not in the current inventory for that expiry is a custom strike. For a taker without enough trading volume, `request` answers it with a JSON-RPC error: `{"code":-32603,"message":"custom strikes require >= 250000 notional volume (have 0)"}`. The volume is per taker address: a taker with enough volume was quoted an unlisted strike. The same strike was quoted from the zero address once the inventory listed it again. A few strikes were still quoted shortly after they left the inventory, presumably within the server's refresh lag. `inferred` for the exact rule.
 
 ### 5.4 Heartbeat, reconnect, cadence
 
@@ -224,7 +230,15 @@ type GasRequest = {
   collateralAmount: string; // §10
   nonce: string;            // String(Date.now()), ms
 };
-type GasResponse = GasRequest & { gasFee: string /* 6-dp USD; may be "" */ }; // echo of the body: inferred
+// live: every sent field comes back unchanged, in the same string forms (checksummed addresses stay checksummed),
+// plus exactly these 12 keys. Observed values: gasFee "0", isEIP1271 false, isPremium false; fees, premiumAsset,
+// settlementCollateralPayout, settlementPayout, settlementPayoutAsset, signature, status, txHash, vaultId "".
+type GasResponse = GasRequest & {
+  gasFee: string;           // 6-dp USD; "0" in every observation (the bundle treats "" as "0")
+  fees: string; isEIP1271: boolean; isPremium: boolean; premiumAsset: string;
+  settlementCollateralPayout: string; settlementPayout: string; settlementPayoutAsset: string;
+  signature: string; status: string; txHash: string; vaultId: string;
+};
 
 // ---- confirm params                                                                  bundle
 type ConfirmParams = GasResponse & {
@@ -298,7 +312,7 @@ Base URL `https://v12.rysk.finance`. GETs need no auth. `live` unless noted othe
 | `/api/inventory` | GET | `Inventory` (the same as WS `inventory`, about 170 KB) |
 | `/api/caps` | GET | `Cap[]` |
 | `/api/products` | GET | `Product[]` |
-| `/api/gas` | POST | Preview body `{assetAddress, chainId, isPut, collateralAsset, expiry, strike, usd, price, quantity}`, or the full `GasRequest` before signing → `{ gasFee, ... }`. Failures are non-2xx responses whose body text is the error; text matching `/gas fee more than premium/i` means the trade is not viable. GET returns 405. The app sends the body as a JSON string with no explicit `Content-Type` and allows 2 retries. `bundle` |
+| `/api/gas` | POST | Preview body `{assetAddress, chainId, isPut, collateralAsset, expiry, strike, usd, price, quantity}`, or the full `GasRequest` before signing → `{ gasFee, ... }`. Failures are non-2xx responses whose body text is the error; text matching `/gas fee more than premium/i` means the trade is not viable. GET returns 405. The app sends the body as a JSON string with no explicit `Content-Type` and allows 2 retries. `bundle`. **`live`:** with the full 18-field body the response is the body echoed unchanged plus exactly the 12 keys in §6's `GasResponse` (30 keys); a preview body is answered `200` too. `gasFee` was `"0"` every time, also with `Content-Type: application/json`. |
 | `/api/expiry-prices/{chainId}/{underlyingAddress}` | GET | `Record<expiryUnixS, priceE8String>`. `"0"` = not yet published; the bundle also handles a `{price, verified}` form |
 | `/api/user/positions?address=` | GET | `Position[]`, open and settled rows (§11) |
 | `/api/taker-history?address=` | GET | JSON rows with `income` (§11). The app downloads `&type=csv`. Without `address` it returns `Invalid address` |
@@ -307,7 +321,7 @@ Base URL `https://v12.rysk.finance`. GETs need no auth. `live` unless noted othe
 | `/api/otokens?id=` | GET | oToken details (`no id(s) passed for otoken details` without `id`) |
 | `/api/maker/*`, `/api/redeem/self` | GET | Maker-side |
 
-Outside the V12 API, the web app's own route `https://app.rysk.finance/api/version/` returns `{sha, timestamp}`, which you can use to detect frontend redeploys.
+Outside the V12 API, the web app's own route `https://app.rysk.finance/api/version/` returns `{sha, timestamp}` (`live`: the 40-hex commit `sha` and a millisecond `timestamp`), which you can use to detect frontend redeploys. On 2026-10-16 it returned `sha` `b6fe173c52c3d7d5420b9c12586e9b1416c6d4b5`, a different commit from the one the `bundle` facts were read from, so re-check those before relying on them.
 
 ## 8. Seller trade flow
 
@@ -336,7 +350,7 @@ seller                         Rysk /taker WS              Rysk REST           H
 6. **Re-quote if needed.** If the final quantity differs from `quote.quantity`, the app re-sends `request` with the new quantity and waits 3 s for the fresh quote, running this in parallel with the approve.
 7. **Gas fee and nonce.** Build a `GasRequest` from the final quote (§6) with `nonce = String(Date.now())` and POST it to `/api/gas`.
 8. **Sign** the EIP-712 `Confirmation` (§9), using `gasFee = gasResponse.gasFee || "0"`.
-9. **Confirm.** Send `{"jsonrpc":"2.0","method":"confirm","id":"confirm","params":ConfirmParams}`. The app sends `{...gasResponse, gasFee, isEIP1271, signature}` and relies on the gas response echoing the body. A defensive client can send `{...gasRequest, ...gasResponse, gasFee, isEIP1271, signature}`, which is the same payload if the echo holds (`inferred`).
+9. **Confirm.** Send `{"jsonrpc":"2.0","method":"confirm","id":"confirm","params":ConfirmParams}`. The app sends `{...gasResponse, gasFee, isEIP1271, signature}` and relies on the gas response echoing the body. A defensive client can send `{...gasRequest, ...gasResponse, gasFee, isEIP1271, signature}`, which is the same payload because the echo holds (`live`, §7). Whether the server accepts a `confirm` built that way has not been tried.
 10. **Result.** `result` is the relayer tx hash. Wait for the receipt over RPC, then refresh `positions` and match on `txHash`. An `error` carries `{code, message}`; the app shows `message` verbatim and drops the quote. **Never re-send a `confirm` blindly** (§5.4).
 
 The app's confirmation UI steps are Processing → Switching network → Awaiting approval → Approving → Refreshing quote → Awaiting signature → Creating position. `bundle`
@@ -393,7 +407,7 @@ const message = {
 - Note that `quoteValidUntil` and `validUntil` are sent in the confirm params but are **not** signed.
 - The taker flow has **no login or SIWE step**.
 
-The maker's `Quote` type is given for reference, since takers never sign it. It uses the same domain (`inferred`, consistent with Rysk's maker CLI) and contains **no taker field**:
+The maker's `Quote` type is given for reference, since takers never sign it. It uses the same domain and contains **no taker field**. **Verified `live`:** every captured maker signature recovers to the quote's `maker` under this domain and type: the 3 spike quotes, the live smoke test's quote, and all 63 quotes of the validation run, from five makers.
 
 ```
 Quote: [assetAddress address, chainId uint256, isPut bool, strike uint256, expiry uint64, maker address,
@@ -421,11 +435,11 @@ const putQtyFromUsd = (usd6dp: bigint, strikeE8: bigint) =>   // e18 contracts, 
 
 For WHYPE (18 dp) a call's `collateralAmount` equals `quantity`. A hypothetical 0.05 UBTC call (8 dp) gives `0.05e18 / 1e10 = 5000000` UBTC base units. For a 50-contract WHYPE call, the collateral is `"50000000000000000000"` WHYPE wei.
 
-### 10.2 Worked example: a real HYPE put fill
+### 10.2 Worked example: a HYPE put fill
 
-Sources: `live` (positions API and the on-chain receipt). The RFQ is reconstructed from the resulting position (`inferred`).
+Sources: `live` (the positions API and the on-chain receipt of real fills). The numbers below are illustrative, rounded from a real fill of these terms; the formulas reproduce the exact values of real fills. The RFQ is reconstructed from the resulting position (`inferred`).
 
-The trade was a cash-secured put, **25 WHYPE @ $78.50**, expiry 2026-10-30 08:00 UTC (`1793347200`), filled 2026-10-16 06:25:25 UTC (`createdAt 1792131925`) with USDC as both collateral and premium token.
+The trade is a cash-secured put, **25 WHYPE @ $78.50**, expiry 2026-10-30 08:00 UTC (`1793347200`), sold 14 days before expiry with USDC as both collateral and premium token.
 
 ```json
 {"jsonrpc":"2.0","method":"request","id":"request","params":{"asset":"0x5555555555555555555555555555555555555555",
@@ -439,28 +453,28 @@ The trade was a cash-secured put, **25 WHYPE @ $78.50**, expiry 2026-10-30 08:00
 | quantity | 25 x 1e18 | `"25000000000000000000"` |
 | strike in RFQ / Confirmation | 78.5 x 1e8 | `"7850000000"` |
 | strike in positions API | 7850000000 x 1e10 | `"78500000000000000000"` |
-| Quote `price` | $1.899452 per contract | `"1899452000000000000"` |
-| premium (6 dp) | 25e18 x 1.899452e18 / 1e30 | `47486300` = **47.4863 USDC** |
+| Quote `price` | $1.90 per contract | `"1900000000000000000"` |
+| premium (6 dp) | 25e18 x 1.9e18 / 1e30 | `47500000` = **47.50 USDC** |
 | `collateralAmount` | 25e18 x 78.5e18 / 1e30 | `1962500000` = **1962.5 USDC** |
-| positions `premium` | 47.4863 at e18 scale | `"47486300000000000000"` |
-| yield on collateral | 47.4863 / 1962.5 | 2.4197 % |
-| time to expiry | (1793347200 - 1792131925) / 86400 | 14.0657 d |
-| APR | 2.4197 % x 365.25 / 14.0657 | **62.83 %**, matching `apr: "62.83"` |
+| positions `premium` | 47.50 at e18 scale | `"47500000000000000000"` |
+| yield on collateral | 47.50 / 1962.5 | 2.4204 % |
+| time to expiry | (`expiry` − `createdAt`) / 86400 | 14 d |
+| APR | 2.4204 % x 365.25 / 14 | **63.15 %**, which the positions API shows as `apr: "63.15"` |
 
-The APR uses a 365.25-day year and the time from `createdAt` to expiry. Four put samples reproduce it exactly, with denominator strike x qty. For calls, the denominator appears to be spot x qty at trade time. `inferred`
+The APR uses a 365.25-day year and the time from `createdAt` to expiry. Four real put fills reproduce the API's `apr` exactly, with denominator strike x qty. For calls, the denominator appears to be spot x qty at trade time. `inferred`
 
-On-chain, this was one relayer transaction. Every transfer inside it is listed in §12.3.
+On-chain, a fill is one relayer transaction. Every transfer inside it is listed in §12.3.
 
 ## 11. Settlement and the positions API
 
 ### 11.1 Position row
 
-Source: `live`, from 87 rows of a real seller wallet. WS `positions {address}` returns the same rows.
+Source: `live`, from the rows of a real seller wallet. WS `positions {address}` returns the same rows.
 
 ```ts
 type Position = {
   address: Address;     // UNDERLYING asset (WHYPE for HYPE), not the collateral
-  apr: string;          // "62.83" (%), see §10.2
+  apr: string;          // "63.15" (%), see §10.2
   chainId: number;
   createdAt: number;    // unix s (trade block time)
   expiry: number;       // unix s
@@ -469,7 +483,7 @@ type Position = {
   quantity: string;     // e18 contracts
   strike: string;       // e18 USD (e8 in RFQ!)
   price: string;        // e18 USD per contract
-  premium: string;      // e18-scaled, == trunc_6dp(quantity * price / 1e18) on all 87 rows
+  premium: string;      // e18-scaled, == trunc_6dp(quantity * price / 1e18) on every row observed
   txHash: Hex;          // relayer trade tx
   usd: Address;         // premium/strike stablecoin
   collateral: Address;  // collateral token
@@ -488,14 +502,14 @@ The endpoint returns **every** position, open and settled. Open rows have `statu
 
 ### 11.2 How settlement is represented
 
-Source: `live`. The examples are real rows; the expiry prices come from `/api/expiry-prices/999/0x5555…5555`.
+Source: `live`. The examples are modelled on real rows, with dates and settlement prices left out; settlement prices come from `/api/expiry-prices/999/0x5555…5555`.
 
 | Outcome | `settlementCollateralPayout` | `payout` | `payoutAsset` | Example |
 |---|---|---|---|---|
-| OTM put | collateral back, 6 dp | `"0"` | WHYPE | 25 @ 81, expiry 2026-10-16, settle 81.18577121 → `"2025000000"` (2025 USDC) |
-| OTM call | collateral back, e18 for WHYPE | `"0"` | USDC | 25 @ 97.5, same expiry → `"25000000000000000000"` (25 WHYPE) |
-| ITM put (assigned) | `"0"` | qty of underlying, e18 | WHYPE | 50 @ 80, expiry 2026-09-11, settle 79.8656 → `"50000000000000000000"` (50 WHYPE) |
-| ITM call (exercised) | `"0"` | strike x qty, stablecoin 6 dp | USDC/USDT0 (= `usd`) | 50 @ 90.5, expiry 2026-09-25, settle 92.9474 → `"4525000000"` (4525 USDC) |
+| OTM put | collateral back, 6 dp | `"0"` | WHYPE | 25 @ 81, settled above the strike → `"2025000000"` (2025 USDC, strike x qty) |
+| OTM call | collateral back, e18 for WHYPE | `"0"` | USDC | 25 @ 97.5, settled below the strike → `"25000000000000000000"` (25 WHYPE) |
+| ITM put (assigned) | `"0"` | qty of underlying, e18 | WHYPE | 50 @ 80, settled below the strike → `"50000000000000000000"` (50 WHYPE) |
+| ITM call (exercised) | `"0"` | strike x qty, stablecoin 6 dp | USDC/USDT0 (= `usd`) | 50 @ 90.5, settled above the strike → `"4525000000"` (4525 USDC) |
 
 Rules for a client:
 
@@ -541,15 +555,15 @@ Oracle feeds `docs`: HYPE uses `STORK.HYPEUSD`, kHYPE uses `STORK.KHYPEUSD`, and
 
 ### 12.3 Anatomy of the observed fill transaction
 
-Source: `live`, the receipt of the §10.2 trade.
+Source: `live`, the receipt of a real put fill of the §10.2 terms. Amounts are rounded except where they follow from the terms.
 
 | # | Event | Amount |
 |---|---|---|
-| 1 | Tx: relayer EOA → Rysk contract; `gasUsed` 735,096, paid by the relayer | n/a |
+| 1 | Tx: relayer EOA → Rysk contract; `gasUsed` about 0.7 M, paid by the relayer | n/a |
 | 2 | USDC Transfer seller → MarginPool (pulls the seller's approval) | 1,962.5 USDC (`1962500000`) |
 | 3 | Series oToken minted to the Rysk contract, then transferred to MMarket (the maker's account) | 25 oTokens (`2500000000`, 8 dp) |
-| 4 | USDC Transfer MMarket → seller (premium) | 47.4863 USDC (`47486300`), exactly `quantity x price` |
-| 5 | USDC Transfer MMarket → fee recipient (maker fee) | 5.935787 USDC = 12.5 % of the premium |
+| 4 | USDC Transfer MMarket → seller (premium) | about 47.5 USDC, exactly `quantity x price` truncated to 6 dp |
+| 5 | USDC Transfer MMarket → fee recipient (maker fee) | about 5.9 USDC, 12.5 % of the premium |
 
 The Gamma controller, the MarginPool and one other contract also emit events. A seller who already has the allowance sends no transaction for a trade at all.
 
@@ -560,6 +574,8 @@ The Gamma controller, the MarginPool and one other contract also emit events. A 
 - `quantity` must be a **multiple of `minTradeSize`** and lie within `[minTradeSize, maxTradeSize]`, both e18 contracts per asset entry. For HYPE that is 25 to 5000 (the inactive kHYPE-PT-19MAR26 allows up to 1000). The app's rounding is `floor((q - min) / min) * min + min`, capped at max. `bundle` `live`
 - Listed strikes are the inventory combinations, all OTM, on a $0.50 grid for HYPE. The UI also allows custom strikes: calls in `[spot, 1.4 x spot]`, puts in `[0.6 x spot, spot]`, stepping by `strikePrecision` (default $0.01). Whether makers quote off-grid strikes competitively is untested. `bundle`
 - Use the combination **keys** for strikes; the per-expiry `strikes` arrays drop the `.5`. `live`
+- **The listed strikes move with spot.** Each side's six strikes per expiry are delta buckets, and spot moves of a few cents shift some of them to the neighbouring $0.50 strike. In the validation run the set of listed (strike, expiry, side) tuples changed about once a minute. `live`
+- **Custom strikes need volume.** A strike outside the current inventory is a custom strike, refused for takers with less than 250 000 USD of notional trading volume (§5.3). `live`
 
 ### 13.2 Caps
 
@@ -593,7 +609,9 @@ The `usage` values are far below the volume of recent fills, so their semantics 
 | Expiry | Fridays 08:00 UTC (every observed position and listed expiry) | `docs` `live` |
 | Settlement | automatic, usually within ~2 h of expiry; 5-min dispute window | `docs` |
 | Observed | positions expiring 2026-10-16 08:00 were `SETTLED` when probed at about 09:53 UTC | `live` |
-| Inventory refresh | about every 30 s | `live` |
+| Inventory refresh | about every 30 s; the listed strike set itself changed about once a minute | `live` |
+| RFQ response | 2.1–3.7 s from send to the quote (mean 2.4 s, 63 quotes) | `live` |
+| Quote TTL | `validUntil` 35–90 s after arrival (45–93 s after the request in the spike). Nearly constant per maker: five makers at about 35, 42, 42, 63 and 90 s | `live` |
 | Early close | not possible | `docs` |
 
 ### 13.4 Rate limits and chain limits
@@ -610,7 +628,7 @@ The `usage` values are far below the volume of recent fills, so their semantics 
 
 ### 13.6 Client-side validations and error strings
 
-Source: `bundle`. These messages are generated by the UI, but they show which checks a bot should replicate: `INVALID AMOUNT`, `DEPOSIT SIZE MUST BE BETWEEN <min> & <max>`, `INSUFFICIENT BALANCE`, `CAP OVERFLOW`, `GAS EXCEEDS PREMIUM`, `Cannot quote <SYM> at the moment, please try again later` (no combinations), and `approveAndConfirm: no quote after the refresh, order not placed`. Server errors arrive as JSON-RPC `error.message`, and so far only `-32601 Method not found` has been observed.
+Source: `bundle`. These messages are generated by the UI, but they show which checks a bot should replicate: `INVALID AMOUNT`, `DEPOSIT SIZE MUST BE BETWEEN <min> & <max>`, `INSUFFICIENT BALANCE`, `CAP OVERFLOW`, `GAS EXCEEDS PREMIUM`, `Cannot quote <SYM> at the moment, please try again later` (no combinations), and `approveAndConfirm: no quote after the refresh, order not placed`. Server errors arrive as JSON-RPC `error.message`. Observed so far: `-32601 Method not found`, and `-32603 custom strikes require >= 250000 notional volume (have 0)` for an unlisted strike (§5.3).
 
 ### 13.7 Access and terms
 
@@ -620,9 +638,9 @@ Source: `bundle`. These messages are generated by the UI, but they show which ch
 
 ## 14. Open questions
 
-1. **`/api/gas` response shape.** The confirm flow depends on the response echoing the request body plus `gasFee`. The bundle strongly implies this, but it was never observed.
+1. **`/api/gas` response shape.** *Resolved `live`:* the response echoes the full body unchanged plus exactly 12 extra keys (§6, §7).
 2. **How `gasFee` is collected.** The one verified fill paid the seller exactly `quantity x price`, so either `gasFee` was 0 or it is netted elsewhere. Capture a non-zero case.
-3. **Quote lifetime.** How far ahead `validUntil` typically lies, and whether `confirm` is rejected after it (very likely).
+3. **Quote lifetime.** *Partly resolved `live`:* `validUntil` lies 35–93 s ahead, fixed per maker (§13.3). Still open: whether `confirm` is rejected after it (very likely).
 4. **Taker binding.** Whether a quote requested with `taker = 0x0` can be confirmed by a real taker, and whether the server checks the taker against the RFQ.
 5. **Server limits.** Server-side rate limits or anti-spam rules for `request` and `confirm`, and any idle timeout on `/taker`.
 6. **Nonce rules.** Whether `Confirmation.nonce` must be a recent ms timestamp, or only unique per taker.
@@ -631,6 +649,7 @@ Source: `bundle`. These messages are generated by the UI, but they show which ch
 9. **Cap usage.** What `caps.usage` actually counts, given values far below observed recent volume.
 10. **Call APR.** Which denominator the call `apr` uses (spot at trade time is assumed).
 11. **API geo-gating.** Whether the API enforces geo-blocking, and how contract-wallet (`isEIP1271`) signatures are verified.
+12. **Custom-strike rule.** How long a strike stays quotable after it leaves the inventory, and how the 250 000 USD of volume is counted (§5.3).
 
 ## References
 

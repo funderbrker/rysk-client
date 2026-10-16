@@ -5,8 +5,11 @@ const MINUTE_MS = 60_000;
 /** Spec §8.7: every strategy and sampler RFQ also takes a token from this shared limit (a sustained rate). */
 export const HARD_CAP_RFQ_PER_MIN = 20;
 /**
- * The part of the hard cap the strategy and sampler rates leave free (a config rule): an execution's re-quote is sent
- * without a token, at most one an execution and one execution a tick, so the total stays under the cap.
+ * The part of the hard cap the strategy and sampler rates leave free (a config rule) for execution re-quotes, which are
+ * sent without a token. There is at most one per execution, and executions are few: they run one at a time, each after
+ * its own RFQ round trip and gas preview; a side whose confirm was sent waits for its reply (up to `confirmTimeoutMs`)
+ * and then cools down, and one that aborted before the confirm backs its key off. `tickSeconds` alone (5 s at least)
+ * does not bound them.
  */
 export const REQUOTE_RESERVE_RFQ_PER_MIN = 2;
 

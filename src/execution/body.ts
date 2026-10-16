@@ -61,8 +61,9 @@ function allowlistedExtras(echoed: Record<string, unknown>): Record<string, unkn
 }
 
 /**
- * The `confirm` params: our body (so every signed field is ours), the echo's allowlisted extras as the app
- * sends them, then our gas fee, `isEIP1271: false` and our signature over them.
+ * The `confirm` params: the echo's allowlisted extras as the app sends them, then our body over them (so every
+ * signed field is ours and no echoed value can replace a body field), then our gas fee, `isEIP1271: false` and
+ * our signature.
  */
 export function buildConfirmParams(
   body: ConfirmBody,
@@ -70,5 +71,5 @@ export function buildConfirmParams(
   gasFee6: bigint,
   signature: Hex,
 ): ConfirmParams {
-  return { ...body, ...allowlistedExtras(echoed), gasFee: gasFee6.toString(), isEIP1271: false, signature };
+  return { ...allowlistedExtras(echoed), ...body, gasFee: gasFee6.toString(), isEIP1271: false, signature };
 }

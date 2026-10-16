@@ -63,6 +63,18 @@ describe('Memo: key backoff', () => {
     expect(memo.isBackedOff(KEY, NOW_SEC)).toBe(false);
   });
 
+  it('backs a custom strike off without an indicative APR: only a spot move resets it', () => {
+    const memo = new Memo(0);
+    const custom = backoffKeyOf('call', 10000000000n, 1792742400);
+    memo.backoffKey(custom, NOW_SEC, SPOT_E8, null);
+    expect(memo.keyBackoff.get(custom)).toMatchObject({ n: 1, untilSec: NOW_SEC + 300, indicativeApr: null });
+    expect(memo.resetBackoffIf(custom, SPOT_E8, null)).toBe(false);
+    // A listing's APR on the same key later on does not reset it either.
+    expect(memo.resetBackoffIf(custom, SPOT_E8, 9)).toBe(false);
+    expect(memo.isBackedOff(custom, NOW_SEC)).toBe(true);
+    expect(memo.resetBackoffIf(custom, 8160000001n, null)).toBe(true);
+  });
+
   it('ignores a reset for a key that is not backed off', () => {
     expect(new Memo(0).resetBackoffIf(KEY, 1n, 9)).toBe(false);
   });

@@ -9,7 +9,6 @@ import {
   EIP712_DOMAIN,
   hashConfirmation,
   makerSignatureOk,
-  normalizeV,
   QUOTE_TYPES,
   recoverQuoteSigner,
   signConfirmation,
@@ -197,6 +196,11 @@ describe('hashConfirmation', () => {
 });
 
 describe('recoverQuoteSigner', () => {
+  it('has the three captured quotes to check, from three makers', () => {
+    expect(spikeQuotes).toHaveLength(3);
+    expect(new Set(spikeQuotes.map((quote) => quote.maker.toLowerCase())).size).toBe(3);
+  });
+
   // All three captured makers recover exactly, which validates the pinned domain and the Quote type.
   it.each(spikeQuotes.map((quote, i) => [i, quote] as const))(
     'recovers the maker of spike quote %i',
@@ -231,26 +235,19 @@ describe('makerSignatureOk', () => {
     expect(await makerSignatureOk({ ...putQuote, nonce: '' }, recoverQuoteSigner)).toBe(false);
   });
 
+  it.each([
+    ['r', 2],
+    ['s', 2 + 64],
+  ])('is false for the captured signature with a byte of %s flipped', async (_part, at) => {
+    const sig = putQuote.signature;
+    const flipped = (Number.parseInt(sig.slice(at, at + 2), 16) ^ 0xff).toString(16).padStart(2, '0');
+    const signature = `${sig.slice(0, at)}${flipped}${sig.slice(at + 2)}` as Hex;
+    expect(signature).not.toBe(sig);
+    expect(signature).toHaveLength(132);
+    expect(await makerSignatureOk({ ...putQuote, signature }, recoverQuoteSigner)).toBe(false);
+  });
+
   it('is null without a way to recover the signer', async () => {
     expect(await makerSignatureOk(putQuote, undefined)).toBeNull();
-  });
-});
-
-describe('normalizeV', () => {
-  const rs = `0x${'ab'.repeat(64)}`;
-
-  it.each([
-    ['00', '1b'],
-    ['01', '1c'],
-    ['1b', '1b'],
-    ['1c', '1c'],
-  ])('maps a trailing v of 0x%s to 0x%s', (v, expected) => {
-    expect(normalizeV(`${rs}${v}` as Hex)).toBe(`${rs}${expected}`);
-  });
-
-  it('leaves a signature that is not 65 bytes unchanged', () => {
-    const compact = `0x${'ab'.repeat(63)}00` as Hex;
-
-    expect(normalizeV(compact)).toBe(compact);
   });
 });

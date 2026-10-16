@@ -119,6 +119,19 @@ describe('parsePositions on the fixture', () => {
     expect(new Set(keys).size).toBe(87);
   });
 
+  it('lowercases an upper-case tx hash, in the position and in its key', () => {
+    const rows = mutated(isWhypeRow, (row) => ({
+      ...row,
+      txHash: `0x${String(row.txHash).slice(2).toUpperCase()}`,
+    }));
+    const upper = String(rows.find(isWhypeRow)?.txHash);
+    expect(upper).toMatch(/^0x[0-9A-F]{64}$/);
+    expect(upper).not.toBe(upper.toLowerCase());
+    const [first] = parsePositions(rows, OPTS).positions;
+    expect(first?.txHash).toBe(upper.toLowerCase());
+    expect(first?.key.startsWith(`${upper.toLowerCase()}|`)).toBe(true);
+  });
+
   it('builds foreign keys in the same normalized form', () => {
     const rows = fixtureRows();
     const ubtc = rows.find((row) => row.symbol === 'UBTC') as Row;
@@ -176,6 +189,21 @@ describe('parsePositions on mutated rows', () => {
     expect(otherRows).toHaveLength(10);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/quantity/);
+  });
+
+  it('counts a duplicated foreign row once, with one warning per duplicated key', () => {
+    const rows = fixtureRows();
+    const foreign = rows.filter((row) => !isWhypeRow(row));
+    const [first, second] = foreign;
+    if (first === undefined || second === undefined) throw new Error('fixture has no foreign rows');
+    const { positions, otherRows, warnings } = parsePositions([...rows, first, first, { ...second }], OPTS);
+    expect(positions).toHaveLength(77);
+    expect(otherRows).toHaveLength(10);
+    expect(new Set(otherRows.map((row) => row.key)).size).toBe(10);
+    expect(warnings).toEqual([
+      expect.stringMatching(/^positions: 3 rows share the key 0x[0-9a-f]{64}\|.*; counted once$/),
+      expect.stringMatching(/^positions: 2 rows share the key 0x[0-9a-f]{64}\|.*; counted once$/),
+    ]);
   });
 
   it.each([

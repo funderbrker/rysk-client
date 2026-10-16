@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { type Address, getAddress, isAddress, isAddressEqual, zeroAddress } from 'viem';
 import { z } from 'zod';
-import { tokenBySymbol } from '../domain/constants.ts';
+import { TOKENS, type TokenInfo, type TokenKey, tokenBySymbol } from '../domain/constants.ts';
 import { e18FromDecimal, fractionFromPct, usd6FromDecimal, usdE8FromDecimal } from '../domain/units.ts';
 import type { SideConfig, WheelConfig } from '../strategy/wheel/config.ts';
 import { HARD_CAP_RFQ_PER_MIN, REQUOTE_RESERVE_RFQ_PER_MIN } from './bucket.ts';
@@ -24,7 +24,10 @@ export type AppConfig = {
   warnings: string[];
 };
 
-/** The research sampler (spec §9.2); `putStables` and `callCollaterals` are token addresses. */
+/**
+ * The research sampler (spec §9.2); `putStables` (USDC, USDT0, USDH) and `callCollaterals` (WHYPE, kHYPE, LHYPE,
+ * wstHYPE) are token addresses.
+ */
 export type SamplerConfig = {
   enabled: boolean;
   sweepEveryMin: number;
@@ -119,15 +122,27 @@ const address = z.string().transform((value, ctx) => {
   return z.NEVER;
 });
 
-/** A token symbol in any case (`usdc`, `KHYPE`), resolved to its address. */
-const tokenAddress = z.string().transform((symbol, ctx) => {
-  try {
-    return tokenBySymbol(symbol).address;
-  } catch {
-    ctx.addIssue({ code: 'custom', message: `unknown token symbol '${symbol}'` });
+/** The sampler's put legs: USD stables only (a put's strike asset and collateral). */
+const PUT_STABLES: readonly TokenKey[] = ['USDC', 'USDT0', 'USDH'];
+/** The sampler's call legs: HYPE collaterals only (a call is collateralized by its underlying). */
+const CALL_COLLATERALS: readonly TokenKey[] = ['WHYPE', 'KHYPE', 'LHYPE', 'WSTHYPE'];
+
+/** A token symbol in any case (`usdc`, `KHYPE`) among `allowed`, resolved to its address. */
+function tokenAddress(allowed: readonly TokenKey[], kind: string) {
+  const symbols = allowed.map((key) => TOKENS[key].symbol.toLowerCase()).join(', ');
+  return z.string().transform((symbol, ctx) => {
+    let token: TokenInfo;
+    try {
+      token = tokenBySymbol(symbol);
+    } catch {
+      ctx.addIssue({ code: 'custom', message: `unknown token symbol '${symbol}'` });
+      return z.NEVER;
+    }
+    if (allowed.some((key) => TOKENS[key].address === token.address)) return token.address;
+    ctx.addIssue({ code: 'custom', message: `'${symbol}' is not ${kind} (${symbols})` });
     return z.NEVER;
-  }
-});
+  });
+}
 
 const logLevel = z
   .string()
@@ -203,9 +218,9 @@ const configFile = z.strictObject({
     maxDeploymentsPer24h: count,
     maxNotionalPer24hUsd: usd6,
     minNativeHype: e18,
-    maxFeePerGasGwei: count,
+    maxFeePerGasGwei: positiveCount,
     confirmTimeoutMs: positiveCount,
-    unknownMaxWaitSec: count,
+    unknownMaxWaitSec: positiveCount,
     maxHypeExposurePct: unbounded(bpsPct),
     pauseOnFrontendChange: z.boolean(),
   }),
@@ -218,8 +233,8 @@ const configFile = z.strictObject({
     inventoryEveryMin: count,
     publicFillsEveryMin: count,
     requestTimeoutMs: positiveCount,
-    putStables: z.array(tokenAddress),
-    callCollaterals: z.array(tokenAddress),
+    putStables: z.array(tokenAddress(PUT_STABLES, 'a USD stable')),
+    callCollaterals: z.array(tokenAddress(CALL_COLLATERALS, 'a HYPE collateral')),
   }),
 });
 
