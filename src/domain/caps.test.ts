@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { parseCaps, remainingCapacityE18 } from './caps.ts';
 import { TOKENS } from './constants.ts';
 import type { Cap } from './types.ts';
+import { UnitError } from './units.ts';
 
 const E18 = 10n ** 18n;
 const WHYPE = TOKENS.WHYPE.address;
@@ -120,5 +121,30 @@ describe('remainingCapacityE18', () => {
 
   it('rejects a non-positive notional price', () => {
     expect(() => remainingCapacityE18(caps, CALL, 0n)).toThrow();
+  });
+
+  it('applies a margin to each cap before subtracting its usage', () => {
+    const contracts = (usageE18: bigint) => [cap('HYPE', 'CONTRACTS', 100n * E18, usageE18)];
+    expect(remainingCapacityE18(contracts(90n * E18), CALL, 8000000000n, 9_500)).toBe(5n * E18);
+    expect(remainingCapacityE18(contracts(96n * E18), CALL, 8000000000n, 9_500)).toBe(0n);
+    expect(remainingCapacityE18(contracts(90n * E18), CALL, 8000000000n)).toBe(10n * E18);
+    expect(remainingCapacityE18(contracts(90n * E18), CALL, 8000000000n, 10_000)).toBe(10n * E18);
+  });
+
+  it('applies the margin to NOTIONAL caps before converting to contracts, and takes the minimum', () => {
+    const rows = [
+      cap('HYPE', 'NOTIONAL', 1000n * E18, 200n * E18),
+      cap('GLOBAL', 'CONTRACTS', 100n * E18, 0n),
+    ];
+    // 950 − 200 = 750 USD at 80 is 9.375 contracts, below GLOBAL's 95.
+    expect(remainingCapacityE18(rows, PUT, 8000000000n, 9_500)).toBe(9375n * 10n ** 15n);
+  });
+
+  it('rejects a margin that is not whole basis points from 0 to 10 000', () => {
+    for (const marginBps of [-1, 10_001, 9_500.5, Number.NaN]) {
+      expect(() => remainingCapacityE18(caps, CALL, 8000000000n, marginBps), String(marginBps)).toThrow(
+        UnitError,
+      );
+    }
   });
 });

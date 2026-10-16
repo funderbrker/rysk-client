@@ -53,6 +53,12 @@ export function formatStrike(strikeE8: bigint): string {
   return formatUnits(strikeE8, STRIKE_DECIMALS);
 }
 
+/** `⌈a / b⌉` for `a ≥ 0`, `b > 0` (bigint `/` truncates). */
+export function ceilDiv(a: bigint, b: bigint): bigint {
+  if (a < 0n || b <= 0n) throw new UnitError(`cannot ceil-divide ${a} by ${b}`);
+  return (a + b - 1n) / b;
+}
+
 /** Largest multiple of `stepE18` not above `qE18`; never rounds up (10 against a step of 25 gives 0). */
 export function floorToIncrement(qE18: bigint, stepE18: bigint): bigint {
   if (stepE18 <= 0n || qE18 < 0n) throw new UnitError(`cannot floor ${qE18} to step ${stepE18}`);
@@ -94,6 +100,17 @@ export function e18FromDecimal(s: string): bigint {
 /** `40` → `0.4`. */
 export function fractionFromPct(n: number): number {
   return n / 100;
+}
+
+/**
+ * A fraction from 0 to 1 in whole basis points (`0.25` → `2500n`), rounded once so that bigint amounts are
+ * scaled by `× bps / 10_000n` rather than through a float.
+ */
+export function fractionToBps(fraction: number): bigint {
+  if (!Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    throw new UnitError(`invalid fraction ${fraction}`);
+  }
+  return BigInt(Math.round(fraction * 10_000));
 }
 
 function parseDecimal(value: string, decimals: number): bigint {

@@ -1,5 +1,5 @@
 import type { Side } from './types.ts';
-import { fractionFromPct, UnitError } from './units.ts';
+import { ceilDiv, fractionFromPct, UnitError } from './units.ts';
 
 /** A 365.25-day year, which is what Rysk annualises over. */
 export const SECONDS_PER_YEAR = 31_557_600n;
@@ -69,9 +69,4 @@ function aprFloorE9(aprFloor: number): bigint {
 function floorDiv(a: bigint, b: bigint): bigint {
   const q = a / b;
   return a % b < 0n ? q - 1n : q;
-}
-
-/** Ceiling division for `a >= 0`, `b > 0`. */
-function ceilDiv(a: bigint, b: bigint): bigint {
-  return (a + b - 1n) / b;
 }

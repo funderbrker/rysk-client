@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ceilDiv,
   collateralForCall,
   collateralForPut,
   e18FromDecimal,
   floorToIncrement,
   formatStrike,
   fractionFromPct,
+  fractionToBps,
   premium6,
   putQuantityFromUsd,
   strikeE8FromKey,
@@ -57,6 +59,20 @@ describe('strike conversions', () => {
   });
 });
 
+describe('ceilDiv', () => {
+  it('rounds an inexact quotient up and leaves an exact one alone', () => {
+    expect(ceilDiv(7n, 2n)).toBe(4n);
+    expect(ceilDiv(6n, 2n)).toBe(3n);
+    expect(ceilDiv(0n, 5n)).toBe(0n);
+  });
+
+  it('throws UnitError for a negative dividend or a non-positive divisor', () => {
+    expect(() => ceilDiv(-1n, 2n)).toThrow(UnitError);
+    expect(() => ceilDiv(1n, 0n)).toThrow(UnitError);
+    expect(() => ceilDiv(1n, -2n)).toThrow(UnitError);
+  });
+});
+
 describe('floorToIncrement', () => {
   it('floors to the step and never clamps up', () => {
     expect(floorToIncrement(10n * E18, 25n * E18)).toBe(0n);
@@ -97,5 +113,23 @@ describe('decimal parsing', () => {
 
   it('turns a percentage into a fraction', () => {
     expect(fractionFromPct(40)).toBe(0.4);
+  });
+});
+
+describe('fractionToBps', () => {
+  it('rounds a fraction to whole basis points', () => {
+    expect(fractionToBps(0.25)).toBe(2500n);
+    expect(fractionToBps(0.5)).toBe(5000n);
+    expect(fractionToBps(0)).toBe(0n);
+    expect(fractionToBps(1)).toBe(10000n);
+    expect(fractionToBps(0.07)).toBe(700n);
+    expect(fractionToBps(0.00004)).toBe(0n);
+    expect(fractionToBps(0.00006)).toBe(1n);
+  });
+
+  it('throws UnitError for NaN, infinities, negatives and fractions above 1', () => {
+    for (const f of [Number.NaN, Number.POSITIVE_INFINITY, -0.01, 1.0001]) {
+      expect(() => fractionToBps(f), String(f)).toThrow(UnitError);
+    }
   });
 });
