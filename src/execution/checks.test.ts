@@ -5,7 +5,12 @@ import { TOKENS, TRADED_PRODUCTS } from '../domain/constants.ts';
 import type { ConfirmBody, Quote, QuoteRequest, Side } from '../domain/types.ts';
 import { recoverQuoteSigner } from '../rysk/eip712.ts';
 import { buildConfirmBody } from './body.ts';
-import { type CheckContext, type ExecutionConfig, runPreSignChecks } from './checks.ts';
+import {
+  type CheckContext,
+  type ExecutionConfig,
+  isAprEchoDisagreement,
+  runPreSignChecks,
+} from './checks.ts';
 import type { CheckResult } from './types.ts';
 
 type SpikeRequest = { request: QuoteRequest; reply: { result: Quote } };
@@ -258,6 +263,20 @@ describe('runPreSignChecks', () => {
     const ctx = context('put');
     mutate(ctx);
     expectFailure(ctx, id);
+  });
+
+  it("tells C7's APR echo disagreement apart from its price checks", () => {
+    const echo = context('put');
+    echo.freshQuote = { ...echo.freshQuote, apy: 77.4 };
+    const echoDetail = expectFailure(echo, 'C7').detail ?? '';
+    expect(isAprEchoDisagreement({ checkId: 'C7', message: echoDetail })).toBe(true);
+    expect(isAprEchoDisagreement({ checkId: 'C8', message: echoDetail })).toBe(false);
+    expect(isAprEchoDisagreement({ message: echoDetail })).toBe(false);
+
+    const price = context('put');
+    price.freshQuote = { ...price.freshQuote, price: '20000000000000000000' };
+    const priceDetail = expectFailure(price, 'C7').detail ?? '';
+    expect(isAprEchoDisagreement({ checkId: 'C7', message: priceDetail })).toBe(false);
   });
 
   it('names the gate hold and the tranche mismatch', () => {

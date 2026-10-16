@@ -53,10 +53,19 @@ export async function approveExact(deps: ApproveDeps, args: ApproveArgs): Promis
   }
 }
 
-/** `ApproveDeps` over viem clients; the wallet client's account signs and owns the approvals. */
+export type ApproveDepsOptions = {
+  /** The EIP-1559 cap per gas (wei) on the approve transaction (`safety.maxFeePerGasGwei`); viem's estimate if unset. */
+  maxFeePerGas?: bigint;
+};
+
+/**
+ * `ApproveDeps` over viem clients; the wallet client's account signs and owns the approvals. Without a wallet
+ * client (dry-run) the reads work and `approve` rejects.
+ */
 export function createApproveDeps(
   publicClient: HyperEvmPublicClient,
-  walletClient: HyperEvmWalletClient,
+  walletClient: HyperEvmWalletClient | undefined,
+  opts: ApproveDepsOptions = {},
 ): ApproveDeps {
   return {
     allowance: (token, owner, spender) =>
@@ -66,13 +75,16 @@ export function createApproveDeps(
         functionName: 'allowance',
         args: [owner, spender],
       }),
-    approve: (token, spender, amount) =>
-      walletClient.writeContract({
+    approve: async (token, spender, amount) => {
+      if (walletClient === undefined) throw new ChainError('approve needs a wallet client (live mode)');
+      return walletClient.writeContract({
         address: token,
         abi: erc20Abi,
         functionName: 'approve',
         args: [spender, amount],
-      }),
+        maxFeePerGas: opts.maxFeePerGas,
+      });
+    },
     waitForReceipt: async (hash, timeoutMs) => {
       try {
         return await publicClient.waitForTransactionReceipt({ hash, timeout: timeoutMs });

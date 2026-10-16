@@ -1,4 +1,4 @@
-import { type Address, type Hex, hashTypedData, recoverTypedDataAddress } from 'viem';
+import { type Address, type Hex, hashTypedData, isAddressEqual, recoverTypedDataAddress } from 'viem';
 import type { PrivateKeyAccount } from 'viem/accounts';
 import { ADDRESSES, CHAIN_ID } from '../domain/constants.ts';
 import { UINT } from '../domain/parse.ts';
@@ -155,6 +155,23 @@ export async function recoverQuoteSigner(quote: Quote): Promise<Address> {
     },
     signature: quote.signature,
   });
+}
+
+/**
+ * Whether `quote` carries its maker's signature, by `recover` (normally `recoverQuoteSigner`, passed explicitly so
+ * a caller without recovery says so): true when it recovers the maker, false when it recovers anyone else or
+ * rejects, `null` when there is no `recover` (not checked). Never rejects.
+ */
+export async function makerSignatureOk(
+  quote: Quote,
+  recover: ((quote: Quote) => Promise<Address>) | undefined,
+): Promise<boolean | null> {
+  if (recover === undefined) return null;
+  try {
+    return isAddressEqual(await recover(quote), quote.maker);
+  } catch {
+    return false;
+  }
 }
 
 /** Maps a 65-byte signature's trailing `v` of 0/1 to 27/28; any other signature is returned unchanged. */

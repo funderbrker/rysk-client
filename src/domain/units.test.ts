@@ -16,6 +16,7 @@ import {
   strikeE18ToE8,
   UnitError,
   usd6FromDecimal,
+  usdE8FromDecimal,
 } from './units.ts';
 
 const E18 = 10n ** 18n;
@@ -104,11 +105,14 @@ describe('decimal parsing', () => {
   it('parses decimal strings without floats', () => {
     expect(usd6FromDecimal('20000')).toBe(20000000000n);
     expect(e18FromDecimal('0.05')).toBe(5n * 10n ** 16n);
+    expect(usdE8FromDecimal('50')).toBe(5_000_000_000n);
+    expect(usdE8FromDecimal('78.12345678')).toBe(7_812_345_678n);
   });
 
   it('throws UnitError for a non-decimal string', () => {
     expect(() => usd6FromDecimal('1e6')).toThrow(UnitError);
     expect(() => e18FromDecimal('')).toThrow(UnitError);
+    expect(() => usdE8FromDecimal('fifty')).toThrow(UnitError);
   });
 
   it('turns a percentage into a fraction', () => {

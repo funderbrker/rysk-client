@@ -1,8 +1,8 @@
 import { getAddress, type Hex, maxUint256, pad, type TransactionReceipt } from 'viem';
 import { describe, expect, it, vi } from 'vitest';
 import { ADDRESSES, TOKENS } from '../domain/index.ts';
-import { ChainError } from './clients.ts';
-import { type ApproveDeps, approveExact } from './erc20.ts';
+import { ChainError, type HyperEvmPublicClient, type HyperEvmWalletClient } from './clients.ts';
+import { type ApproveDeps, approveExact, createApproveDeps } from './erc20.ts';
 
 const OWNER = getAddress('0x000000000000000000000000000000000000beef');
 const TOKEN = TOKENS.USDC.address;
@@ -106,5 +106,43 @@ describe('approveExact', () => {
     await expect(approveExact(deps, { ...ARGS, amount })).rejects.toThrow(ChainError);
     expect(deps.nonces).not.toHaveBeenCalled();
     expect(deps.approve).not.toHaveBeenCalled();
+  });
+});
+
+describe('createApproveDeps', () => {
+  const publicClient = { readContract: vi.fn(async () => 7n) } as unknown as HyperEvmPublicClient;
+
+  function fakeWallet() {
+    const writeContract = vi.fn(async (_args: Record<string, unknown>) => HASH);
+    return { writeContract, client: { writeContract } as unknown as HyperEvmWalletClient };
+  }
+
+  it('sends the approve with the configured fee cap', async () => {
+    const wallet = fakeWallet();
+    const deps = createApproveDeps(publicClient, wallet.client, { maxFeePerGas: 5_000_000_000n });
+
+    expect(await deps.approve(TOKEN, SPENDER, AMOUNT)).toBe(HASH);
+    expect(wallet.writeContract).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        address: TOKEN,
+        functionName: 'approve',
+        args: [SPENDER, AMOUNT],
+        maxFeePerGas: 5_000_000_000n,
+      }),
+    );
+  });
+
+  it("leaves the fee to viem's estimate without a cap", async () => {
+    const wallet = fakeWallet();
+    await createApproveDeps(publicClient, wallet.client).approve(TOKEN, SPENDER, AMOUNT);
+
+    expect(wallet.writeContract.mock.calls[0]?.[0].maxFeePerGas).toBeUndefined();
+  });
+
+  it('reads without a wallet client and refuses to approve', async () => {
+    const deps = createApproveDeps(publicClient, undefined);
+
+    expect(await deps.allowance(TOKEN, OWNER, SPENDER)).toBe(7n);
+    await expect(deps.approve(TOKEN, SPENDER, AMOUNT)).rejects.toThrow(ChainError);
   });
 });

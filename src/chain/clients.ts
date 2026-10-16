@@ -22,15 +22,15 @@ export type HyperEvmWalletClient = WalletClient<HttpTransport, typeof hyperEvm, 
 
 export type ChainClients = { publicClient: HyperEvmPublicClient; walletClient?: HyperEvmWalletClient };
 
-/** Public client on HyperEVM, plus a wallet client signing with `account` when one is given. */
+/**
+ * Public client on HyperEVM, plus a wallet client signing with `account` when one is given. Both batch the
+ * JSON-RPC calls made in the same tick into one HTTP request (the snapshot's multicall and its two nonce reads).
+ */
 export function createChainClients(opts: { rpcUrl: string; account?: Account }): ChainClients {
-  const publicClient = createPublicClient({ chain: hyperEvm, transport: http(opts.rpcUrl) });
+  const transport = http(opts.rpcUrl, { batch: true });
+  const publicClient = createPublicClient({ chain: hyperEvm, transport });
   if (opts.account === undefined) return { publicClient };
-  const walletClient = createWalletClient({
-    chain: hyperEvm,
-    transport: http(opts.rpcUrl),
-    account: opts.account,
-  });
+  const walletClient = createWalletClient({ chain: hyperEvm, transport, account: opts.account });
   return { publicClient, walletClient };
 }
 

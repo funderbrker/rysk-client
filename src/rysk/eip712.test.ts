@@ -8,6 +8,7 @@ import {
   CONFIRMATION_TYPES,
   EIP712_DOMAIN,
   hashConfirmation,
+  makerSignatureOk,
   normalizeV,
   QUOTE_TYPES,
   recoverQuoteSigner,
@@ -216,6 +217,22 @@ describe('recoverQuoteSigner', () => {
 
   it('refuses a quote whose nonce is not a decimal uint string', async () => {
     await expect(recoverQuoteSigner({ ...putQuote, nonce: '' })).rejects.toThrow('quote nonce');
+  });
+});
+
+describe('makerSignatureOk', () => {
+  it('is true for a captured quote its maker signed', async () => {
+    expect(await makerSignatureOk(putQuote, recoverQuoteSigner)).toBe(true);
+  });
+
+  it('is false when a signed field was altered or recovery rejects', async () => {
+    const altered = { ...putQuote, price: `${BigInt(putQuote.price) + 1n}` };
+    expect(await makerSignatureOk(altered, recoverQuoteSigner)).toBe(false);
+    expect(await makerSignatureOk({ ...putQuote, nonce: '' }, recoverQuoteSigner)).toBe(false);
+  });
+
+  it('is null without a way to recover the signer', async () => {
+    expect(await makerSignatureOk(putQuote, undefined)).toBeNull();
   });
 });
 

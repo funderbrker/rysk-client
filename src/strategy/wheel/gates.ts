@@ -173,9 +173,12 @@ function gasReserve({ s, c }: Context): Failure | null {
     : null;
 }
 
-/** G10: no STOP file, the wheel enabled, and no frontend change while `pauseOnFrontendChange` is on. */
+/**
+ * G10: in live, no STOP file (dry-run continues with it, spec §9.4); in both modes the wheel enabled and no
+ * frontend change while `pauseOnFrontendChange` is on.
+ */
 function switchedOn({ s, c }: Context): Failure | null {
-  if (s.memo.stopFile) return fail('kill-switch', 'the STOP file is present');
+  if (s.mode === 'live' && s.memo.stopFile) return fail('kill-switch', 'the STOP file is present');
   if (!c.enabled) return fail('disabled', 'the wheel is disabled');
   if (s.memo.frontendChanged && c.safety.pauseOnFrontendChange) {
     return fail('frontend-changed', 'the Rysk frontend version changed');

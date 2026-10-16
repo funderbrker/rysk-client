@@ -97,6 +97,11 @@ export function e18FromDecimal(s: string): bigint {
   return parseDecimal(s, 18);
 }
 
+/** A USD price in strike units, 8 dp (`'50'` → `5_000_000_000n`), such as a HYPE basis. */
+export function usdE8FromDecimal(s: string): bigint {
+  return parseDecimal(s, STRIKE_DECIMALS);
+}
+
 /** `40` → `0.4`. */
 export function fractionFromPct(n: number): number {
   return n / 100;

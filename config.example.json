@@ -1,0 +1,99 @@
+{
+  "mode": "dry-run",
+  "enabled": true,
+  "account": { "address": "0x0000000000000000000000000000000000000000", "keystorePath": "keystore/wheel" },
+  "rpcUrl": "https://rpc.hyperliquid.xyz/evm",
+  "rysk": {
+    "restUrl": "https://v12.rysk.finance",
+    "wsUrl": "wss://v12.rysk.finance/taker",
+    "appUrl": "https://app.rysk.finance"
+  },
+  "tickSeconds": 60,
+  "dataDir": "data",
+  "logLevel": "info",
+  "put": {
+    "enabled": true,
+    "minAprPct": 40,
+    "minHoursToExpiry": 36,
+    "maxDaysToExpiry": 16,
+    "minAbsDelta": 0.05,
+    "maxAbsDelta": 0.45,
+    "minOtmPct": 1,
+    "minIntervalHours": 24,
+    "trancheFraction": 0.25,
+    "maxContractsPerTrade": 25,
+    "reserveUsdc": "0",
+    "maxCapitalUsdc": null
+  },
+  "call": {
+    "enabled": true,
+    "minAprPct": 40,
+    "minHoursToExpiry": 36,
+    "maxDaysToExpiry": 16,
+    "minAbsDelta": 0.05,
+    "maxAbsDelta": 0.45,
+    "minOtmPct": 1,
+    "minIntervalHours": 24,
+    "trancheFraction": 0.25,
+    "maxContractsPerTrade": 25,
+    "reserveWhype": "0",
+    "maxCapitalWhype": null,
+    "minStrikeOverBasisPct": 0,
+    "fallback": {
+      "enabled": true,
+      "scope": "window",
+      "customStrikeFirst": false,
+      "maxDiscountToBasisPct": null,
+      "minNetPremiumUsd": "1"
+    }
+  },
+  "tranche": { "allowSingleLot": true },
+  "basis": {
+    "anchor": { "ts": 1760000000, "qtyWhype": "100", "basisUsd": "50" },
+    "externalFlows": [],
+    "residualPolicy": "absorb",
+    "residualToleranceWhype": "0.000001"
+  },
+  "quoting": {
+    "quotesPerSide": 3,
+    "rfqTimeoutMs": 15000,
+    "replanSec": 300,
+    "prefilterRatio": 0.5,
+    "strategyRfqPerMin": 12,
+    "samplerRfqPerMin": 6
+  },
+  "safety": {
+    "maxGasFeeUsd": "0.5",
+    "maxGasFeeBps": 200,
+    "minNetPremiumUsd": "1",
+    "minQuoteTtlSec": 15,
+    "maxQuoteTtlSec": 600,
+    "maxPremiumFractionOfCollateral": 0.15,
+    "aprEchoTolerancePp": 1.0,
+    "verifyMakerSig": "warn",
+    "maxClockSkewMs": 3000,
+    "startupQuietSec": 600,
+    "settlementGraceSec": 900,
+    "settlementOverdueHours": 6,
+    "maxDeploymentsPer24h": 4,
+    "maxNotionalPer24hUsd": "20000",
+    "minNativeHype": "0.05",
+    "maxFeePerGasGwei": 5,
+    "confirmTimeoutMs": 60000,
+    "unknownMaxWaitSec": 1800,
+    "maxHypeExposurePct": null,
+    "pauseOnFrontendChange": true
+  },
+  "sampler": {
+    "enabled": true,
+    "sweepEveryMin": 60,
+    "pinned": 4,
+    "pinnedEveryMin": 5,
+    "takerPairEveryMin": 60,
+    "inventoryEveryMin": 5,
+    "publicFillsEveryMin": 60,
+    "requestTimeoutMs": 6000,
+    "putStables": ["usdc", "usdt0"],
+    "callCollaterals": ["whype", "khype", "lhype", "wsthype"]
+  }
+}

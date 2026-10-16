@@ -226,6 +226,25 @@ describe('checkGates global gates', () => {
     expect(holds({ ...changed, config: { safety: { pauseOnFrontendChange: false } } })).toEqual([null, null]);
   });
 
+  it('G10 holds on the STOP file in live only: dry-run continues (spec §9.4)', () => {
+    const stop = { memo: { stopFile: true } };
+    expect(holds({ snapshot: { ...stop, mode: 'live' } })).toEqual(['kill-switch', 'kill-switch']);
+    expect(holds({ snapshot: { ...stop, mode: 'dry-run' } })).toEqual([null, null]);
+    expect(gates('put', { snapshot: { ...stop, mode: 'dry-run' } }).results).toContainEqual({
+      id: 'G10',
+      pass: true,
+    });
+    // A disabled wheel and a frontend change hold in both modes.
+    expect(holds({ snapshot: { mode: 'dry-run' }, config: { enabled: false } })).toEqual([
+      'disabled',
+      'disabled',
+    ]);
+    expect(holds({ snapshot: { mode: 'dry-run', memo: { frontendChanged: true } } })).toEqual([
+      'frontend-changed',
+      'frontend-changed',
+    ]);
+  });
+
   it('G11 holds in live mode at the daily deployment or notional limit', () => {
     expect(holds({ state: { deploymentsLast24h: 4 } })).toEqual(['daily-limit', 'daily-limit']);
     expect(holds({ state: { deploymentsLast24h: 3 } })).toEqual([null, null]);

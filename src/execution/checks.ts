@@ -84,6 +84,8 @@ const NONCE_SKEW_MS = 5000;
 const MAX_FRESH_STATE_AGE_MS = 10_000;
 const MAX_LISTINGS_AGE_MS = 300_000;
 const MODES: readonly string[] = ['normal', 'basis-fallback', 'basis-fallback-custom'];
+/** How C7's detail starts when the quote's `apy` disagrees with our APR (its price checks say otherwise). */
+const APR_ECHO_DETAIL = 'our APR ';
 
 const PASS: Outcome = { pass: true };
 
@@ -259,9 +261,19 @@ function c7(ctx: CheckContext): Outcome {
   const ours = aprFraction(t.premium6, t.collateral6, ctx.serverNowSec, quote.expiry);
   const quoted = aprFractionFromRyskApy(quote.apy);
   if (!(Math.abs(ours - quoted) <= config.aprEchoTolerancePp / 100)) {
-    return fail(`our APR ${ours} vs quoted ${quoted}: more than ${config.aprEchoTolerancePp} pp apart`);
+    return fail(
+      `${APR_ECHO_DETAIL}${ours} vs quoted ${quoted}: more than ${config.aprEchoTolerancePp} pp apart`,
+    );
   }
   return PASS;
+}
+
+/**
+ * Whether a failed check (an `aborted('guard')` result's `checkId` and `message`) is C7's APR echo disagreement
+ * rather than one of C7's price checks; the daemon halts live on the second (spec §10).
+ */
+export function isAprEchoDisagreement(failure: { checkId?: string; message: string }): boolean {
+  return failure.checkId === 'C7' && failure.message.startsWith(APR_ECHO_DETAIL);
 }
 
 /** C8: the net premium after the GAS step's fee clears the APR floor (normal) or the fallback floor. */
