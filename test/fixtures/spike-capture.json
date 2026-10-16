@@ -1,0 +1,197 @@
+{
+ "capturedAt": "2026-10-16T10:28:36.707Z",
+ "requests": [
+  {
+   "label": "put-usdc-0.25d",
+   "request": {
+    "asset": "0x5555555555555555555555555555555555555555",
+    "assetName": "WHYPE",
+    "chainId": 999,
+    "expiry": 1792742400,
+    "isPut": true,
+    "quantity": "25000000000000000000",
+    "strike": "7800000000",
+    "taker": "0x0000000000000000000000000000000000000000",
+    "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "collateralAsset": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "isEIP1271": false
+   },
+   "inventory": {
+    "k": "78.000000-1792742400",
+    "delta": -0.22483704398759918,
+    "apy": 37.19799570955594,
+    "index": 81.05865867
+   },
+   "sentMs": 1792146507103,
+   "replyMs": 1792146509519,
+   "latencyMs": 2416,
+   "reply": {
+    "jsonrpc": "2.0",
+    "id": "request",
+    "result": {
+     "assetAddress": "0x5555555555555555555555555555555555555555",
+     "chainId": 999,
+     "isPut": true,
+     "strike": "7800000000",
+     "expiry": 1792742400,
+     "maker": "0x66799bc69d7a7daaf50b6aa03cd5c6a2df1a9454",
+     "nonce": "1792146507232583277",
+     "price": "1109494507915005812",
+     "quantity": "25000000000000000000",
+     "isTakerBuy": false,
+     "signature": "0x31a68d067ac0a4e4f6620a731d2883da6ac85c1d5dcfc8144d766fe52cdab184651d2b5495f4b05b053887064328aada17c19406f478fd8f965b9c175bdad2b91b",
+     "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+     "collateralAsset": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+     "validUntil": 1792146573,
+     "premiumAsset": "",
+     "apy": 75.3299527524557
+    }
+   },
+   "otherFrames": []
+  },
+  {
+   "label": "call-whype-0.25d",
+   "request": {
+    "asset": "0x5555555555555555555555555555555555555555",
+    "assetName": "WHYPE",
+    "chainId": 999,
+    "expiry": 1792742400,
+    "isPut": false,
+    "quantity": "25000000000000000000",
+    "strike": "8450000000",
+    "taker": "0x0000000000000000000000000000000000000000",
+    "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "collateralAsset": "0x5555555555555555555555555555555555555555",
+    "isEIP1271": false
+   },
+   "inventory": {
+    "k": "84.500000-1792742400",
+    "delta": 0.20475037395710943,
+    "apy": 29.14483499653628,
+    "index": 81.05865867
+   },
+   "sentMs": 1792146510026,
+   "replyMs": 1792146512428,
+   "latencyMs": 2402,
+   "reply": {
+    "jsonrpc": "2.0",
+    "id": "request",
+    "result": {
+     "assetAddress": "0x5555555555555555555555555555555555555555",
+     "chainId": 999,
+     "isPut": false,
+     "strike": "8450000000",
+     "expiry": 1792742400,
+     "maker": "0xf7f97e0b45c230d209d0a721414ff7abfcacae80",
+     "nonce": "1792146510213",
+     "price": "1147800779097562112",
+     "quantity": "25000000000000000000",
+     "isTakerBuy": false,
+     "signature": "0x4baa0e28ff6501e8a2ec7a95e147db22b4a98e52486d4053f76876beac44d9137443646604aa4370c0ece97e352f78cb6715d725e255a0595410e7d4959621f91b",
+     "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+     "collateralAsset": "0x5555555555555555555555555555555555555555",
+     "validUntil": 1792146555,
+     "premiumAsset": "",
+     "apy": 74.97319195960361
+    }
+   },
+   "otherFrames": []
+  },
+  {
+   "label": "call-khype-farOTM",
+   "request": {
+    "asset": "0x5555555555555555555555555555555555555555",
+    "assetName": "kHYPE",
+    "chainId": 999,
+    "expiry": 1795766400,
+    "isPut": false,
+    "quantity": "25000000000000000000",
+    "strike": "10900000000",
+    "taker": "0x0000000000000000000000000000000000000000",
+    "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "collateralAsset": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+    "isEIP1271": false
+   },
+   "inventory": {
+    "k": "109.000000-1795766400",
+    "delta": 0.07116576922026291,
+    "apy": 4.854342794340801,
+    "index": 81.05865867
+   },
+   "sentMs": 1792146512943,
+   "replyMs": 1792146515170,
+   "latencyMs": 2227,
+   "reply": {
+    "jsonrpc": "2.0",
+    "id": "request",
+    "result": {
+     "assetAddress": "0x5555555555555555555555555555555555555555",
+     "chainId": 999,
+     "isPut": false,
+     "strike": "10900000000",
+     "expiry": 1795766400,
+     "maker": "0x403426e707fcc907d17b96ab2e4ddf7962040233",
+     "nonce": "1792146515148",
+     "price": "626193170444733305",
+     "quantity": "25000000000000000000",
+     "isTakerBuy": false,
+     "signature": "0x91a58489f385a7aef10b8dc5b321958beea18936f7c24874d7642d3fcc84a7d8110c06d8508976bfee8dcecc3aed5683553c4df915c9b82ad577a7d9afc0a9751b",
+     "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+     "collateralAsset": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+     "validUntil": 1792146605,
+     "premiumAsset": "",
+     "apy": 6.732969079061974
+    }
+   },
+   "otherFrames": []
+  }
+ ],
+ "gas": {
+  "preview": {
+   "status": 200,
+   "contentType": "application/json",
+   "body": "{\"maker\":\"\",\"assetAddress\":\"0x5555555555555555555555555555555555555555\",\"chainId\":999,\"expiry\":1792742400,\"isPut\":true,\"nonce\":\"\",\"price\":\"1109494507915005812\",\"quantity\":\"25000000000000000000\",\"quoteNonce\":\"\",\"quoteValidUntil\":0,\"quoteSignature\":\"\",\"strike\":\"7800000000\",\"taker\":\"\",\"isTakerBuy\":false,\"signature\":\"\",\"validUntil\":0,\"usd\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"txHash\":\"\",\"fees\":\"\",\"status\":\"\",\"collateralAsset\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"gasFee\":\"0\",\"collateralAmount\":\"\",\"isEIP1271\":false,\"premiumAsset\":\"\",\"isPremium\":false,\"vaultId\":\"\",\"settlementCollateralPayout\":\"\",\"settlementPayout\":\"\",\"settlementPayoutAsset\":\"\"}",
+   "sent": {
+    "assetAddress": "0x5555555555555555555555555555555555555555",
+    "chainId": 999,
+    "isPut": true,
+    "collateralAsset": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "expiry": 1792742400,
+    "strike": "7800000000",
+    "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "price": "1109494507915005812",
+    "quantity": "25000000000000000000"
+   }
+  },
+  "full": {
+   "status": 200,
+   "contentType": "application/json",
+   "body": "{\"maker\":\"0x66799bc69d7a7daaf50b6aa03cd5c6a2df1a9454\",\"assetAddress\":\"0x5555555555555555555555555555555555555555\",\"chainId\":999,\"expiry\":1792742400,\"isPut\":true,\"nonce\":\"1792146516346\",\"price\":\"1109494507915005812\",\"quantity\":\"25000000000000000000\",\"quoteNonce\":\"1792146507232583277\",\"quoteValidUntil\":1792146573,\"quoteSignature\":\"0x31a68d067ac0a4e4f6620a731d2883da6ac85c1d5dcfc8144d766fe52cdab184651d2b5495f4b05b053887064328aada17c19406f478fd8f965b9c175bdad2b91b\",\"strike\":\"7800000000\",\"taker\":\"0x0000000000000000000000000000000000000000\",\"isTakerBuy\":false,\"signature\":\"\",\"validUntil\":1792146573,\"usd\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"txHash\":\"\",\"fees\":\"\",\"status\":\"\",\"collateralAsset\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"gasFee\":\"0\",\"collateralAmount\":\"1950000000\",\"isEIP1271\":false,\"premiumAsset\":\"\",\"isPremium\":false,\"vaultId\":\"\",\"settlementCollateralPayout\":\"\",\"settlementPayout\":\"\",\"settlementPayoutAsset\":\"\"}",
+   "sent": {
+    "assetAddress": "0x5555555555555555555555555555555555555555",
+    "chainId": 999,
+    "expiry": 1792742400,
+    "isPut": true,
+    "isTakerBuy": false,
+    "maker": "0x66799bc69d7a7daaf50b6aa03cd5c6a2df1a9454",
+    "price": "1109494507915005812",
+    "quantity": "25000000000000000000",
+    "quoteNonce": "1792146507232583277",
+    "quoteSignature": "0x31a68d067ac0a4e4f6620a731d2883da6ac85c1d5dcfc8144d766fe52cdab184651d2b5495f4b05b053887064328aada17c19406f478fd8f965b9c175bdad2b91b",
+    "quoteValidUntil": 1792146573,
+    "validUntil": 1792146573,
+    "strike": "7800000000",
+    "taker": "0x0000000000000000000000000000000000000000",
+    "usd": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "collateralAsset": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+    "collateralAmount": "1950000000",
+    "nonce": "1792146516346"
+   }
+  },
+  "tinyPrice": {
+   "status": 200,
+   "contentType": "application/json",
+   "body": "{\"maker\":\"\",\"assetAddress\":\"0x5555555555555555555555555555555555555555\",\"chainId\":999,\"expiry\":1792742400,\"isPut\":true,\"nonce\":\"\",\"price\":\"1\",\"quantity\":\"25000000000000000000\",\"quoteNonce\":\"\",\"quoteValidUntil\":0,\"quoteSignature\":\"\",\"strike\":\"7800000000\",\"taker\":\"\",\"isTakerBuy\":false,\"signature\":\"\",\"validUntil\":0,\"usd\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"txHash\":\"\",\"fees\":\"\",\"status\":\"\",\"collateralAsset\":\"0xb88339cb7199b77e23db6e890353e22632ba630f\",\"gasFee\":\"0\",\"collateralAmount\":\"\",\"isEIP1271\":false,\"premiumAsset\":\"\",\"isPremium\":false,\"vaultId\":\"\",\"settlementCollateralPayout\":\"\",\"settlementPayout\":\"\",\"settlementPayoutAsset\":\"\"}"
+  }
+ }
+}

@@ -1,0 +1,291 @@
+{
+ "1": [
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+   "decimals": 18,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "WETH",
+   "chainId": 1,
+   "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+   "active": true,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+   "decimals": 18,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "weETH",
+   "chainId": 1,
+   "address": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+   "active": true,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+   "decimals": 18,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "wstETH",
+   "chainId": 1,
+   "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+   "active": true,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "XAUT",
+   "underlyingAssetAddress": "0x68749665ff8d2d112fa859aa293f07a622782f38",
+   "decimals": 6,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "XAUT",
+   "chainId": 1,
+   "address": "0x68749665ff8d2d112fa859aa293f07a622782f38",
+   "active": true,
+   "price": "4177530848670000000000",
+   "multipliers": [],
+   "marketStatus": {
+    "isOpen": true,
+    "opensAt": 1792360800,
+    "closesAt": 1792184400
+   }
+  },
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+   "decimals": 18,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "rETH",
+   "chainId": 1,
+   "address": "0xae78736cd615f374d3085123a210448e74fc6393",
+   "active": true,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "BTC",
+   "underlyingAssetAddress": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+   "decimals": 8,
+   "minTradeSize": "50000000000000000",
+   "maxTradeSize": "5000000000000000000",
+   "symbol": "WBTC",
+   "chainId": 1,
+   "address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+   "active": true,
+   "price": "82095435019090000000000",
+   "multipliers": []
+  }
+ ],
+ "8453": [
+  {
+   "underlying": "BTC",
+   "underlyingAssetAddress": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+   "decimals": 8,
+   "minTradeSize": "100000000000000000",
+   "maxTradeSize": "5000000000000000000",
+   "symbol": "cbBTC",
+   "chainId": 8453,
+   "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+   "active": false,
+   "price": "82095435019090000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0x4200000000000000000000000000000000000006",
+   "decimals": 18,
+   "minTradeSize": "1000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "WETH",
+   "chainId": 8453,
+   "address": "0x4200000000000000000000000000000000000006",
+   "active": false,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  }
+ ],
+ "999": [
+  {
+   "underlying": "SOL",
+   "underlyingAssetAddress": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29",
+   "decimals": 9,
+   "minTradeSize": "10000000000000000000",
+   "maxTradeSize": "500000000000000000000",
+   "symbol": "USOL",
+   "chainId": 999,
+   "address": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29",
+   "active": true,
+   "price": "106245214410000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "5000000000000000000000",
+   "symbol": "LHYPE",
+   "chainId": 999,
+   "address": "0x5748ae796ae46a4f1348a1693de4b50560485562",
+   "active": true,
+   "price": "81480320440000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "5000000000000000000000",
+   "symbol": "kHYPE-PT",
+   "chainId": 999,
+   "address": "0x311db0fde558689550c68355783c95efdfe25329",
+   "active": false,
+   "price": "81480320440000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "5000000000000000000000",
+   "symbol": "WHYPE",
+   "chainId": 999,
+   "address": "0x5555555555555555555555555555555555555555",
+   "active": true,
+   "price": "81480320440000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "1000000000000000000000",
+   "symbol": "kHYPE-PT-19MAR26",
+   "chainId": 999,
+   "address": "0xea84ca9849d9e76a78b91f221f84e9ca065fc9f5",
+   "active": false,
+   "price": "81480320440000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "BTC",
+   "underlyingAssetAddress": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463",
+   "decimals": 8,
+   "minTradeSize": "25000000000000000",
+   "maxTradeSize": "5000000000000000000",
+   "symbol": "UBTC",
+   "chainId": 999,
+   "address": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463",
+   "active": true,
+   "price": "82095435019090000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "PURR",
+   "underlyingAssetAddress": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+   "decimals": 18,
+   "minTradeSize": "10000000000000000000000",
+   "maxTradeSize": "1000000000000000000000000",
+   "symbol": "PURR",
+   "chainId": 999,
+   "address": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+   "active": true,
+   "price": "104212640000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "5000000000000000000000",
+   "symbol": "wstHYPE",
+   "chainId": 999,
+   "address": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
+   "active": true,
+   "price": "81480320440000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "PUMP",
+   "underlyingAssetAddress": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452",
+   "decimals": 6,
+   "minTradeSize": "500000000000000000000000",
+   "maxTradeSize": "50000000000000000000000000",
+   "symbol": "UPUMP",
+   "chainId": 999,
+   "address": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452",
+   "active": true,
+   "price": "4460500000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "ETH",
+   "underlyingAssetAddress": "0xbe6727b535545c67d5caa73dea54865b92cf7907",
+   "decimals": 18,
+   "minTradeSize": "500000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "UETH",
+   "chainId": 999,
+   "address": "0xbe6727b535545c67d5caa73dea54865b92cf7907",
+   "active": true,
+   "price": "2456138634740000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "XRP",
+   "underlyingAssetAddress": "0xd70659a6396285bf7214d7ea9673184e7c72e07e",
+   "decimals": 6,
+   "minTradeSize": "1000000000000000000000",
+   "maxTradeSize": "100000000000000000000000",
+   "symbol": "fXRP",
+   "chainId": 999,
+   "address": "0xd70659a6396285bf7214d7ea9673184e7c72e07e",
+   "active": true,
+   "price": "1338029340000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "ZEC",
+   "underlyingAssetAddress": "0xbe068bb3c7ef5b56360655638f75bf5a6c5f8c10",
+   "decimals": 18,
+   "minTradeSize": "5000000000000000000",
+   "maxTradeSize": "100000000000000000000",
+   "symbol": "bZEC",
+   "chainId": 999,
+   "address": "0xbe068bb3c7ef5b56360655638f75bf5a6c5f8c10",
+   "active": true,
+   "price": "1233380534070000000000",
+   "multipliers": []
+  },
+  {
+   "underlying": "HYPE",
+   "underlyingAssetAddress": "0x5555555555555555555555555555555555555555",
+   "decimals": 18,
+   "minTradeSize": "25000000000000000000",
+   "maxTradeSize": "5000000000000000000000",
+   "symbol": "kHYPE",
+   "chainId": 999,
+   "address": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+   "active": true,
+   "price": "81480320440000000000",
+   "multipliers": [
+    {
+     "value": "1x",
+     "name": "Kinetiq"
+    }
+   ]
+  }
+ ]
+}

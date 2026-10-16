@@ -1,4 +1,8 @@
-
-
-
+node_modules/
+dist/
+coverage/
+keystore/
+config.json
+data/
+*.password
 .env

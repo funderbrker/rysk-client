@@ -1,0 +1,644 @@
+[
+ {
+  "name": "0xd70659a6396285bf7214d7ea9673184e7c72e07e",
+  "type": "CONTRACTS",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907-true",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "21000000000000000000"
+ },
+ {
+  "name": "0xfd739d4e423301ce9385c1fb8850539d657c296d-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5748ae796ae46a4f1348a1693de4b50560485562-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xae78736cd615f374d3085123a210448e74fc6393-false",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "PUMP",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "HYPE",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "125000000000000000000"
+ },
+ {
+  "name": "XAUT",
+  "type": "CONTRACTS",
+  "cap": "2500000000000000000000",
+  "usage": "48000000000000000000"
+ },
+ {
+  "name": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38-false",
+  "type": "CONTRACTS",
+  "cap": "7500000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599-false",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "ZEC",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "114000000000000000000"
+ },
+ {
+  "name": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "125000000000000000000"
+ },
+ {
+  "name": "0x94e8396e0869c9f2200760af0621afd240e1cf38-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "5350000000000000000"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463",
+  "type": "CONTRACTS",
+  "cap": "100000000000000000000",
+  "usage": "4975000000000000000"
+ },
+ {
+  "name": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463-true",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "4800000000000000000"
+ },
+ {
+  "name": "0xea84ca9849d9e76a78b91f221f84e9ca065fc9f5-false",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2-false",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "85000000000000000000"
+ },
+ {
+  "name": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee-false",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "BTC",
+  "type": "CONTRACTS",
+  "cap": "100000000000000000000",
+  "usage": "10325000000000000000"
+ },
+ {
+  "name": "0x5748ae796ae46a4f1348a1693de4b50560485562",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29-true",
+  "type": "CONTRACTS",
+  "cap": "400000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2-true",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "29000000000000000000"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38-true",
+  "type": "CONTRACTS",
+  "cap": "7500000000000000000000",
+  "usage": "48000000000000000000"
+ },
+ {
+  "name": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e-false",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599-true",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "5350000000000000000"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "21500000000000000000"
+ },
+ {
+  "name": "XRP",
+  "type": "CONTRACTS",
+  "cap": "100000000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "SOL",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38",
+  "type": "CONTRACTS",
+  "cap": "7500000000000000000000",
+  "usage": "48000000000000000000"
+ },
+ {
+  "name": "0x311db0fde558689550c68355783c95efdfe25329",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x4200000000000000000000000000000000000006",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907-false",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "500000000000000000"
+ },
+ {
+  "name": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0-false",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xae78736cd615f374d3085123a210448e74fc6393",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "125000000000000000000"
+ },
+ {
+  "name": "0xbe068bb3c7ef5b56360655638f75bf5a6c5f8c10",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29",
+  "type": "CONTRACTS",
+  "cap": "50000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+  "type": "CONTRACTS",
+  "cap": "100000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555-true",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463-false",
+  "type": "CONTRACTS",
+  "cap": "100000000000000000000",
+  "usage": "175000000000000000"
+ },
+ {
+  "name": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+  "type": "CONTRACTS",
+  "cap": "1000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "PURR",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "ETH",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000",
+  "usage": "135500000000000000000"
+ },
+ {
+  "name": "0xea84ca9849d9e76a78b91f221f84e9ca065fc9f5",
+  "type": "CONTRACTS",
+  "cap": "150000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452-false",
+  "type": "CONTRACTS",
+  "cap": "500000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xfd739d4e423301ce9385c1fb8850539d657c296d",
+  "type": "NOTIONAL",
+  "cap": "2660000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29",
+  "type": "NOTIONAL",
+  "cap": "700000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29-false",
+  "type": "NOTIONAL",
+  "cap": "700000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5748ae796ae46a4f1348a1693de4b50560485562-false",
+  "type": "NOTIONAL",
+  "cap": "500000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599-true",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "384450000000000000000000"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "15400000000000000000000"
+ },
+ {
+  "name": "PUMP",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x068f321fa8fb9f0d135f290ef6a3e2813e1c8a29-true",
+  "type": "NOTIONAL",
+  "cap": "400000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555-true",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907-true",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "45650000000000000000000"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38-false",
+  "type": "NOTIONAL",
+  "cap": "1500000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "1325000000000000000000"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "XRP",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "ZEC",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x311db0fde558689550c68355783c95efdfe25329",
+  "type": "NOTIONAL",
+  "cap": "560000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xfd739d4e423301ce9385c1fb8850539d657c296d-false",
+  "type": "NOTIONAL",
+  "cap": "2660000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xae78736cd615f374d3085123a210448e74fc6393-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "384450000000000000000000"
+ },
+ {
+  "name": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463-true",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "357975000000000000000000"
+ },
+ {
+  "name": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e-false",
+  "type": "NOTIONAL",
+  "cap": "280000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "ETH",
+  "type": "NOTIONAL",
+  "cap": "1400000000000000000000000",
+  "usage": "329025000000000000000000"
+ },
+ {
+  "name": "XAUT",
+  "type": "NOTIONAL",
+  "cap": "250000000000000000000000",
+  "usage": "194770000000000000000000"
+ },
+ {
+  "name": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e",
+  "type": "NOTIONAL",
+  "cap": "280000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xea84ca9849d9e76a78b91f221f84e9ca065fc9f5-false",
+  "type": "NOTIONAL",
+  "cap": "560000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452-false",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "HYPE",
+  "type": "NOTIONAL",
+  "cap": "2660000000000000000000000",
+  "usage": "13462500000000000000000"
+ },
+ {
+  "name": "0xae78736cd615f374d3085123a210448e74fc6393",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x9fdbda0a5e284c32744d2f17ee5c74b284993463",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "373375000000000000000000"
+ },
+ {
+  "name": "0x4200000000000000000000000000000000000006",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555-false",
+  "type": "NOTIONAL",
+  "cap": "2660000000000000000000000",
+  "usage": "13462500000000000000000"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2-true",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "64200000000000000000000"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "217850000000000000000000"
+ },
+ {
+  "name": "PURR",
+  "type": "NOTIONAL",
+  "cap": "280000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38",
+  "type": "NOTIONAL",
+  "cap": "1500000000000000000000000",
+  "usage": "194770000000000000000000"
+ },
+ {
+  "name": "0x27ec642013bcb3d80ca3706599d3cda04f6f4452",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xd70659a6396285bf7214d7ea9673184e7c72e07e",
+  "type": "NOTIONAL",
+  "cap": "300000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe068bb3c7ef5b56360655638f75bf5a6c5f8c10",
+  "type": "NOTIONAL",
+  "cap": "200000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x94e8396e0869c9f2200760af0621afd240e1cf38-false",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "GLOBAL",
+  "type": "NOTIONAL",
+  "cap": "4000000000000000000000000",
+  "usage": "1295082500000000000000000"
+ },
+ {
+  "name": "BTC",
+  "type": "NOTIONAL",
+  "cap": "1750000000000000000000000",
+  "usage": "757825000000000000000000"
+ },
+ {
+  "name": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "282050000000000000000000"
+ },
+ {
+  "name": "0x5748ae796ae46a4f1348a1693de4b50560485562",
+  "type": "NOTIONAL",
+  "cap": "500000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0x5555555555555555555555555555555555555555",
+  "type": "NOTIONAL",
+  "cap": "2660000000000000000000000",
+  "usage": "13462500000000000000000"
+ },
+ {
+  "name": "0xea84ca9849d9e76a78b91f221f84e9ca065fc9f5",
+  "type": "NOTIONAL",
+  "cap": "560000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xbe6727b535545c67d5caa73dea54865b92cf7907",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "46975000000000000000000"
+ },
+ {
+  "name": "0x68749665ff8d2d112fa859aa293f07a622782f38-true",
+  "type": "NOTIONAL",
+  "cap": "1500000000000000000000000",
+  "usage": "194770000000000000000000"
+ },
+ {
+  "name": "SOL",
+  "type": "NOTIONAL",
+  "cap": "700000000000000000000000",
+  "usage": "0"
+ },
+ {
+  "name": "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
+  "type": "NOTIONAL",
+  "cap": "1000000000000000000000000",
+  "usage": "0"
+ }
+]
