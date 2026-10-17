@@ -405,6 +405,43 @@ describe('JsonRpcSocket', () => {
     expect(second).toEqual({ settled: true, value: 'two' });
   });
 
+  it('takes one error reply as the late answer to a timed-out call of the method, then rejects the next', async () => {
+    const socket = socketWith();
+    const accept = (result: unknown) => result === 'two';
+    const first = track(socket.call('request', { n: 1 }, { timeoutMs: 1_000, accept }));
+    const ws = await openLatest();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first.error).toBeInstanceOf(CallTimeoutError);
+
+    const second = track(socket.call('request', { n: 2 }, { timeoutMs: 10_000, accept }));
+    expect(ws.frames()).toEqual([frame('request', { n: 1 }), frame('request', { n: 2 })]);
+
+    ws.reply({ id: 'request', error: { code: -32603, message: 'custom strikes require volume' } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.settled).toBe(false);
+
+    ws.reply({ id: 'request', error: { code: -32603, message: 'custom strikes require volume' } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.error).toBeInstanceOf(RyskRpcError);
+    expect(second.error).toMatchObject({ code: -32603 });
+  });
+
+  it('rejects the next call with an error reply once a stale result has answered the timed-out call', async () => {
+    const socket = socketWith();
+    const accept = (result: unknown) => result === 'two';
+    const first = track(socket.call('request', { n: 1 }, { timeoutMs: 1_000, accept }));
+    const ws = await openLatest();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first.error).toBeInstanceOf(CallTimeoutError);
+
+    const second = track(socket.call('request', { n: 2 }, { timeoutMs: 10_000, accept }));
+    ws.reply({ id: 'request', result: 'one' });
+    ws.reply({ id: 'request', error: { code: -32000, message: 'no makers' } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.error).toBeInstanceOf(RyskRpcError);
+    expect(second.error).toMatchObject({ code: -32000 });
+  });
+
   it('never sends a call without accept where a timed-out call of its method may still be answered', async () => {
     const socket = socketWith();
     const a = track(socket.call('confirm', { n: 'A' }, { timeoutMs: 1_000 }));

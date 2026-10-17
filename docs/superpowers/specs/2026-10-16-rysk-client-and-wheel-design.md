@@ -346,7 +346,9 @@ skew (§8.3 G5).
 - `call(method, params, { timeoutMs, accept?, signal? })`: because `id === method`, calls are serialized
   per method; `timeoutMs` covers queue wait, connect and response, and a queued call whose deadline passes
   is dropped unsent. A reply whose `result` fails `accept` is logged and ignored, and waiting continues
-  (late replies to a previous request have the same id). `error` → `RyskRpcError(code, message)`; close
+  (late replies to a previous request have the same id). `error` → `RyskRpcError(code, message)`, except that
+  while a sent call of the method was abandoned unanswered on the connection, one `error` reply to a call with
+  `accept` is taken as that abandoned call's late answer and ignored (an error names no terms to match); close
   while pending → `SocketClosedError`; errors with `id: null` are logged. The caller never retries blindly.
 - `SocketClosedError` and `CallTimeoutError` carry `sent: boolean` (whether the frame reached the socket), and
   `CallOptions.onSent()` fires synchronously once a frame is written. A sent call abandoned unanswered marks its

@@ -26,8 +26,9 @@ export type CallOptions = {
   /** Covers queue wait, connect and reply. */
   timeoutMs: number;
   /**
-   * Replies whose `result` fails this are ignored and waiting continues (a late reply shares the id). A call
-   * without it is never sent on a connection where a sent call of its method was abandoned unanswered.
+   * Replies whose `result` fails this are ignored and waiting continues (a late reply shares the id); so is one
+   * `error` reply while a sent call of the method was abandoned unanswered on the connection, since an error
+   * names no terms to match. A call without it is never sent on such a connection.
    */
   accept?: (result: unknown) => boolean;
   signal?: AbortSignal;
@@ -353,6 +354,12 @@ export class JsonRpcSocket {
       return;
     }
     if (frame.error !== undefined && frame.error !== null) {
+      // A result names the terms `accept` matches; an error names nothing. While a sent call of this method
+      // was abandoned unanswered on this connection, one error reply is taken as that call's late answer.
+      if (call.accept !== undefined && this.#unanswered.delete(id)) {
+        this.#logger.debug({ id, error: frame.error }, 'rysk ws ignored an error reply to an abandoned call');
+        return;
+      }
       this.#reject(call, rpcError(frame.error));
       return;
     }
@@ -360,7 +367,11 @@ export class JsonRpcSocket {
       this.#logger.warn({ id }, 'rysk ws dropped a reply with neither result nor error');
       return;
     }
-    if (call.accept !== undefined && !this.#accepts(call.accept, id, frame.result)) return;
+    if (call.accept !== undefined && !this.#accepts(call.accept, id, frame.result)) {
+      // The late reply to the abandoned call, if there was one, has now come.
+      this.#unanswered.delete(id);
+      return;
+    }
     if (this.#detach(call)) call.resolve(frame.result);
     this.#drive();
   }
