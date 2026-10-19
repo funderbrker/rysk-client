@@ -95,6 +95,7 @@ export function stateRecord(tick: number, st: WheelState, s: Snapshot, memo: Mem
       backedOffKeys: memo.keyBackoff.size,
       pendingVisibility: memo.pendingVisibility.length,
       unknownWaits: memo.unknownWaits.length,
+      rejectedWatches: memo.rejectedWatches.length,
     },
   };
 }

@@ -39,6 +39,7 @@ These combinations fail safe:
 | `--live` with `"mode": "dry-run"` | Exits 1 with a config error. |
 | `"mode": "live"` without `--live` | Runs dry-run and logs a warning. |
 | `--live` with the zero address as `account.address` | Refused. |
+| `--live` with `"verifyMakerSig": "warn"` | Refused: live needs `"enforce"`. |
 
 Dry-run never opens the keystore.
 
@@ -81,7 +82,7 @@ Every check runs against the fresh quote and a fresh snapshot taken just before 
 | C4 | The quote echoes the request on every term field. |
 | C5 | The maker is neither zero nor us. The quote nonce was never signed in this process. The maker signature recovers when `verifyMakerSig: "enforce"` (else a recorded warning). |
 | C6 | `minQuoteTtlSec ≤ validUntil − serverNow ≤ maxQuoteTtlSec`, and `validUntil < expiry`. |
-| C7 | `price > 0`. `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral`. Our APR (gas 0) is within `aprEchoTolerancePp` of the quote's `apy`. |
+| C7 | `price > 0`. `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral`. Our APR (gas 0) is within `aprEchoTolerancePp` of the quote's `apy` for a put, and within the larger of that and `aprEchoToleranceRelPct` for a call. A non-finite `apy` fails. |
 | C8 | The net premium after the real gas fee clears `minAprPct` (normal) or the fallback floor. It is also always ≥ `safety.minNetPremiumUsd`. |
 | C9 | `/api/gas` echoes our body exactly, plus only the known extra keys with their known values. The fee is ≤ `maxGasFeeBps` of the premium, ≤ `maxGasFeeUsd` and ≤ the bound the decision recorded in the intent. |
 | C10 | The strike is in the OTM band around fresh spot: a put in `[0.6 S, S(1 − minOtmPct)]`, a call in `[S(1 + minOtmPct), 1.4 S]` (the planner applies the same band). It is on the strike grid, and listed in an inventory at most 5 min old (custom fallback strikes excepted). |
@@ -128,7 +129,8 @@ Fatal events **halt live in memory**: the process never executes again until it 
 - a gas-echo mismatch (`aborted('echo')`);
 - three confirm errors (rejected or reverted) within an hour;
 - two reverts within 24 h;
-- two C7 APR-echo disagreements;
+- two C7 APR-echo disagreements within an hour;
+- a rejected confirm whose fill appears in the positions anyway (`rejected-filled`), since that fill went through no receipt verification;
 - an RFQ error whose text matches `geo|forbidden|restricted`.
 
 A STOP write that fails after a send also halts live in memory, and the failure is logged at error level. `STATUS.json` then shows `health: "halted"`. Dry-run only logs what live would have done.
@@ -143,7 +145,7 @@ A STOP write that fails after a send also halts live in memory, and the failure 
 | event | effect |
 |---|---|
 | A sent confirm | Starts the side's cooldown. |
-| `confirm-rejected` or `reverted` | 60 s cooldown. The DCA interval is not consumed. |
+| `confirm-rejected` or `reverted` | 60 s cooldown. The DCA interval is not consumed. A rejection is also watched for `unknownMaxWaitSec`: a row with its terms created at or after the confirm is a fill the error reply denied, recorded as `rejected-filled`, and halts live. The watch holds nothing and ends silently, or at the next sent confirm on the same trade. |
 | `filled` | Holds the side until the fill's `txHash` shows in the positions API, at most `unknownMaxWaitSec`. |
 | `unknown` (no reply, socket closed, receipt timeout) | Holds the side until there is evidence: a matching position row, or the vault counter rising. After `unknownMaxWaitSec` it logs an error and unblocks. Nothing is re-signed meanwhile. |
 | A below-floor or failed quote | The instrument backs off for `min(60 min, 5 min × 2^(n−1))`. This resets when spot moves more than 2 % or the indicative APR rises more than 25 %. |
@@ -173,14 +175,14 @@ cp config.example.json config.json
 chmod 600 config.json
 ```
 
-**3. Basis anchor.** Calls need the HYPE cost basis. The example ships a **placeholder** anchor (`ts 1760000000`, `qtyWhype "100"`, `basisUsd "50"`) so that it loads. **Replace it.** Run:
+**3. Basis anchor.** Calls need the HYPE cost basis. The example ships a **zero** anchor, which `run` refuses while `call.enabled` is true. Fill it in:
 ```sh
 pnpm rysk basis suggest-anchor          # prints {"ts":<block time>,"qtyWhype":"<WHYPE held + WHYPE locked in open calls>"}
 ```
 - Copy `ts` and `qtyWhype` into `basis.anchor`.
 - Set `basisUsd` to the average USD price you paid per HYPE, as a decimal string.
 
-Only `run` requires a positive anchor while `call.enabled` is true. The read-only commands, `suggest-anchor` included, work with a zero anchor. Record later WHYPE deposits and withdrawals in `basis.externalFlows`; otherwise `residualPolicy` handles them (see the configuration reference).
+Only `run` requires a positive `ts` and `basisUsd` while `call.enabled` is true, so an anchor whose `ts` or `basisUsd` is still 0 is refused too. The read-only commands, `suggest-anchor` included, work with the zero anchor; so does `run` with `call.enabled: false`. Record later WHYPE deposits and withdrawals in `basis.externalFlows`; otherwise `residualPolicy` handles them (see the configuration reference).
 
 **4. Look before running.**
 ```sh
@@ -196,7 +198,7 @@ pnpm rysk run         # dry-run: records to data/, never trades
 | On a TTY | A hidden prompt on stderr. |
 | Otherwise | The file named by `KEYSTORE_PASSWORD_FILE`. |
 
-The password file is refused unless it is owner-only: `chmod 600` (or `400`). A `KEYSTORE_PASSWORD` environment variable is deliberately not supported. The password is not kept after decryption.
+The password file is refused unless it is owner-only: `chmod 600` (or `400`). One trailing line break is dropped (editors and `echo` add one); any other whitespace counts as part of the password. A `KEYSTORE_PASSWORD` environment variable is deliberately not supported. The password is not kept after decryption.
 
 ## Commands
 
@@ -282,8 +284,9 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `safety.minQuoteTtlSec` | s | The minimum quote time left (C6). Below it plus a 10 s margin, the executable quote is re-requested, so it still clears C6 after the gas call. |
 | `safety.maxQuoteTtlSec` | s | Implausibly long TTLs are refused. Must be ≥ `minQuoteTtlSec`. |
 | `safety.maxPremiumFractionOfCollateral` | fraction 0–1 | C7's plausibility bound on `price / strike` (put) or `price / spot` (call). |
-| `safety.aprEchoTolerancePp` | percentage points | How far our APR may differ from the quote's `apy` (C7). |
-| `safety.verifyMakerSig` | `"warn"` \| `"enforce"` | Whether a 65-byte maker signature that does not recover blocks the trade (C5). Under `warn` it is logged and the quote may trade; use `enforce` for live. A signature that is not 65 bytes (an EIP-1271 contract signature) is never accepted in v1: the quote is recorded as `mismatch` whatever this says. |
+| `safety.aprEchoTolerancePp` | percentage points, positive | How far our APR may differ from the quote's `apy` (C7): the whole tolerance for a put, the floor of a call's. |
+| `safety.aprEchoToleranceRelPct` | percent of the quote's `apy` | The relative half of C7's tolerance, calls only: the larger of the two applies. A call's APR is priced at fresh spot while the maker priced `apy` moments earlier, so at a 100 % APR the 1 pp floor alone would fail on a 1 % move. Puts, whose collateral is the strike, agreed exactly in the validation run and keep the absolute tolerance; the run's calls agreed within 0.07 pp. |
+| `safety.verifyMakerSig` | `"warn"` \| `"enforce"` | Whether a 65-byte maker signature that does not recover blocks the trade (C5). Under `warn` it is logged and the quote may trade, so a live run is refused unless this is `enforce`; dry-run accepts either. A signature that is not 65 bytes (an EIP-1271 contract signature) is never accepted in v1: the quote is recorded as `mismatch` whatever this says. |
 | `safety.maxClockSkewMs` | ms | G5. |
 | `safety.startupQuietSec` | s | Live sends nothing for this long after startup (G7). |
 | `safety.settlementGraceSec` | s | G3's wait after the last pending settlement, and on every fresh start. |
@@ -293,7 +296,7 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `safety.minNativeHype` | HYPE string | The native gas reserve (G9 and C2 in live). Never auto-unwraps WHYPE. |
 | `safety.maxFeePerGasGwei` | integer gwei ≥ 1 | The `maxFeePerGas` cap of the approve transaction. |
 | `safety.confirmTimeoutMs` | ms | The wait for a `confirm` reply. A timeout gives an `unknown` result. |
-| `safety.unknownMaxWaitSec` | integer s ≥ 1 | The longest a side waits for evidence after a `filled` or `unknown` result. |
+| `safety.unknownMaxWaitSec` | integer s ≥ 1 | The longest a side waits for evidence after a `filled` or `unknown` result. Also how long a rejected confirm is watched for the fill its reply denied, which halts live (`rejected-filled`). |
 | `safety.maxHypeExposurePct` | % \| null | S5: hold puts while HYPE is more than this share of HYPE plus put capital. |
 | `safety.pauseOnFrontendChange` | boolean | Hold every new trade, in both modes, after the Rysk frontend `sha` changes, until restart. |
 | `sampler.enabled` | boolean | The research sampler. Also turned off by `run --no-sampler`. |
@@ -394,7 +397,7 @@ Every stream is append-only JSONL at `<dataDir>/<stream>/YYYY-MM-DD.jsonl` (UTC 
 | `state` | tick | `tick`, `nowSec` (block time), `localNowMs`, the chain reads (block, balances, allowances, vault counter, `pendingNonceGap`), `spotE8`, `inventoryTs`, `consistency`, both sides' `capital` (free / locked / pending / total / budget), `basis` (`basisE8`, `qtyE18`, `residualE18`, `reliable`, `reason`), `lastDeployTs`, the 24 h counts, row counts by phase, `anomalies`, `warnings`, and the memo (cooldowns, halt flag, backoffs, waits) |
 | `decisions` | side per tick | `gates` (every applicable gate's `{ id, pass, detail }`), `capital`, `basis`, `floor.minApr`, `plan` (hold reason or `prefilterBypassed`, with a `detail`), `candidates` (key, rank, mode, quantity, collateral, indicative APR and delta), `excluded` (each filtered listing and why), `backedOff`, the `quotes` obtained, and `result`: a trade's terms and `minPriceE18`, or a hold's reason and best quote. While a side waits for `replanDueSec`, the record is just `{ replanDueSec, result }`. |
 | `quotes` | RFQ, whatever its outcome | see below |
-| `executions` | `sellOption` step | `{ execId, step, detail }` for `precheck`, `approve` (`wouldApprove` in dry-run), `requote`, `gas` (the echo verbatim), `checks` (every C1–C18 result), and in live `trade-intent` (write-ahead), `confirm-sent`, `confirm-reply`, `receipt`, `premium-shortfall` (the premium received is below the expected net), `verified`, `stop`. Then the loop's `{ tick, step: "result", execId, side, intent, result, backoff }`, e.g. `result: { status: "aborted", stage: "dry-run", echoOk, wouldApprove }`; `backoff` is `{ key, untilSec, n }` when a pre-confirm abort backed the instrument off, else `null`. Later, `visible` (with `visibilityLatencySec`), `visibility-timeout`, `unknown-resolved` and `unknown-expired`. |
+| `executions` | `sellOption` step | `{ execId, step, detail }` for `precheck`, `approve` (`wouldApprove` in dry-run), `requote`, `gas` (the echo verbatim), `checks` (every C1–C18 result), and in live `trade-intent` (write-ahead), `confirm-sent`, `confirm-reply`, `receipt`, `premium-shortfall` (the premium received is below the expected net), `verified`, `stop`. Then the loop's `{ tick, step: "result", execId, side, intent, result, backoff }`, e.g. `result: { status: "aborted", stage: "dry-run", echoOk, wouldApprove }`; `backoff` is `{ key, untilSec, n }` when a pre-confirm abort backed the instrument off, else `null`. Later, `visible` (with `visibilityLatencySec`), `visibility-timeout`, `unknown-resolved`, `unknown-expired` and `rejected-filled` (a row matching a rejected confirm). |
 | `inventory` | full: first and every `inventoryEveryMin`; diff: a listed-set or cap change in between | `trigger`, `contentHash` (of what is listed and the cap limits) and `inventoryTs`. A full record (`first` / `interval`) adds every parsed HYPE listing (strike, expiry, side, delta, `indicativeApr`, `indexUsd`, products), the HYPE-relevant caps (GLOBAL, HYPE, the sampled tokens) with usage, and `droppedCaps` (cap entries the parser dropped). A `changed` record adds only the difference from the previous record: `added` and `removed` instrument keys, `productsChanged` (keys whose products changed) and `capsChanged` (`{ name, type, capE18, previousCapE18 }`, `null` for a cap that is new or gone). |
 | `public-fills` | public fill new to this run | `{ fromSec, toSec, fill }`, where `fill` is the `/api/history` row as returned |
 
@@ -538,7 +541,7 @@ The run stopped by itself (exit 0) after 15 minutes, at its first dry-run execut
    - whether the server checks `nonce` recency;
    - what caps `usage` counts;
    - how long settlement lags;
-   - the role of the Gamma controller `0x577b…` versus the vault store.
+   - what else the Gamma controller `0x577b…` does: in the verified fill it minted the short (`ShortOtokenMinted`), which receipt verification now pins to it, while the vault store emitted `VaultOpened`.
 
 ## Development
 

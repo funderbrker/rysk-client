@@ -152,6 +152,7 @@ export function wheelConfig(patch: ConfigPatch = {}): WheelConfig {
       maxQuoteTtlSec: 600,
       maxPremiumFractionOfCollateral: 0.15,
       aprEchoTolerancePp: 1,
+      aprEchoToleranceRelPct: 0.05,
       verifyMakerSig: 'warn',
       maxClockSkewMs: 3000,
       startupQuietSec: 600,

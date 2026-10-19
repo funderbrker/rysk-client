@@ -724,7 +724,13 @@ describe('runLoop: live', () => {
     ['reverted', { status: 'reverted', txHash: TX, bookkeepingErrors: [] }],
     [
       'confirm-rejected',
-      { status: 'aborted', stage: 'confirm-rejected', message: 'rejected', bookkeepingErrors: [] },
+      {
+        status: 'aborted',
+        stage: 'confirm-rejected',
+        message: 'rejected',
+        confirmSentAtSec: NOW_SEC,
+        bookkeepingErrors: [],
+      },
     ],
   ])('counts a %s result towards --max-trades: the confirm was sent', async (_name, result) => {
     const h = harness('live', { execute: vi.fn(async () => result) });
@@ -782,6 +788,50 @@ describe('runLoop: live', () => {
     expect(put(1)?.result).toMatchObject({ kind: 'trade' });
     expect(put(2)?.result).toMatchObject({ kind: 'hold', reason: 'cooldown' });
     expect(h.memo.pendingVisibility).toHaveLength(1);
+  });
+
+  it("halts live when a rejected confirm's row appears in the positions anyway", async () => {
+    const rejected: TradeResult = {
+      status: 'aborted',
+      stage: 'confirm-rejected',
+      message: 'rejected',
+      confirmSentAtSec: NOW_SEC,
+      bookkeepingErrors: [],
+    };
+    const execute = vi.fn(async (_: TradeIntent): Promise<TradeResult> => rejected);
+    // From the second tick on, the positions list a row with the rejected trade's terms, created after the send.
+    const snapshot = vi.fn(async () => {
+      const [intent] = execute.mock.calls[0] ?? [];
+      const base = fixturePositions().find((p) => p.isPut && p.status === 'open');
+      if (base === undefined) throw new Error('no open put in the fixtures');
+      const positions = happyPositions();
+      if (intent !== undefined) {
+        const { strikeE8, expirySec, quantityE18 } = intent.candidate;
+        positions.push({
+          ...base,
+          key: 'denied',
+          strikeE8,
+          expirySec,
+          quantityE18,
+          createdAtSec: NOW_SEC + 1,
+          txHash: TX,
+        });
+      }
+      return fixtureTick(Date.now(), 'live', positions);
+    });
+    const h = harness('live', { execute, snapshot });
+    await runTicks(h, appConfig('live'), 2);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(h.memo.cooldownUntilSec.put).toBe(NOW_SEC + 60);
+    expect(h.of('executions').find((r) => r.step === 'rejected-filled')).toMatchObject({
+      side: 'put',
+      txHash: TX,
+    });
+    expect(h.deps.writeStop).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(TX));
+    expect(h.memo.haltedLive).toBe(true);
+    const statuses = vi.mocked(h.deps.status).mock.calls.map(([status]) => status);
+    expect(statuses.at(-1)).toMatchObject({ tick: 2, health: 'halted', halted: true });
   });
 
   it('never executes while halted, and reports the halt', async () => {

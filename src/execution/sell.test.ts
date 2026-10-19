@@ -14,8 +14,8 @@ import { premium6 } from '../domain/units.ts';
 import type { ConfirmationMessage } from '../rysk/eip712.ts';
 import type { ConfirmReply } from '../rysk/taker.ts';
 import type { ExecutionConfig } from './checks.ts';
-import { REQUOTE_MARGIN_SEC, sellOption } from './sell.ts';
-import type { ExecutionEvent, FreshState, TradeDeps, TradeIntent } from './types.ts';
+import { abortedOnQuote, REQUOTE_MARGIN_SEC, sellOption } from './sell.ts';
+import type { ExecutionEvent, FreshState, TradeDeps, TradeIntent, TradeResult } from './types.ts';
 
 type SpikeRequest = { request: QuoteRequest; reply: { result: Quote } };
 const capture = JSON.parse(
@@ -69,6 +69,7 @@ function config(): ExecutionConfig {
     maxQuoteTtlSec: 600,
     maxPremiumFractionOfCollateral: 0.15,
     aprEchoTolerancePp: 1,
+    aprEchoToleranceRelPct: 0.05,
     verifyMakerSig: 'warn',
     maxDeploymentsPer24h: 4,
     maxNotionalPer24h6: 20_000_000_000n,
@@ -860,6 +861,7 @@ describe('sellOption', () => {
         message: expect.stringContaining('quote expired'),
         approveTxHash: APPROVE_HASH,
         bookkeepingErrors: [],
+        confirmSentAtSec: SERVER_NOW_SEC,
       });
       expect(deps.onConfirmSent).toHaveBeenCalledOnce();
       expect(deps.onConfirmCleared).toHaveBeenCalledExactlyOnceWith('put');
@@ -1167,5 +1169,45 @@ describe('sellOption', () => {
       expect(await sellOption(deps, intent())).toMatchObject({ status: 'unknown', reason: 'verify-failed' });
       expect(deps.writeStop).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('rpc down'));
     });
+  });
+});
+
+describe('abortedOnQuote', () => {
+  const aborted = (stage: string, checkId?: string): TradeResult => ({
+    status: 'aborted',
+    stage: stage as 'guard',
+    message: `${stage} failed`,
+    ...(checkId === undefined ? {} : { checkId }),
+  });
+
+  it.each([
+    ['requote', undefined],
+    ['price-floor', undefined],
+    ['gas', undefined],
+    ['guard', 'C7'],
+    ['guard', 'C9'],
+    ['guard', undefined],
+  ])('is true for %s %s: the abort repeats on the same quote', (stage, checkId) => {
+    expect(abortedOnQuote(aborted(stage, checkId))).toBe(true);
+  });
+
+  it.each([
+    ['guard', 'C2'],
+    ['guard', 'C10'],
+    ['precheck', undefined],
+    ['approve', undefined],
+    ['echo', undefined],
+    ['sign', undefined],
+    ['shutdown', undefined],
+    ['confirm-rejected', undefined],
+    ['dry-run', undefined],
+  ])('is false for %s %s: our state, timing or the send', (stage, checkId) => {
+    expect(abortedOnQuote(aborted(stage, checkId))).toBe(false);
+  });
+
+  it('is false for every result that is not an abort', () => {
+    const sent = { confirmSentAtSec: 1, bookkeepingErrors: [] };
+    expect(abortedOnQuote({ status: 'unknown', reason: 'confirm-timeout', ...sent })).toBe(false);
+    expect(abortedOnQuote({ status: 'reverted', txHash: FILL_HASH, bookkeepingErrors: [] })).toBe(false);
   });
 });

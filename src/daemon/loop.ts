@@ -1,4 +1,5 @@
 import type { Side } from '../domain/types.ts';
+import { abortedOnQuote } from '../execution/sell.ts';
 import type { TradeIntent, TradeResult } from '../execution/types.ts';
 import type { Clock, sleep } from '../lib/time.ts';
 import type { WheelConfig } from '../strategy/wheel/config.ts';
@@ -91,10 +92,6 @@ const ESCALATE_AT_FAILURE = 3;
 /** RFQ error text suggesting a geo or access block (spec §10). */
 const GEO_BLOCKED = /geo|forbidden|restricted/i;
 const HOUR_SEC = 3_600;
-/** Aborts before the confirm that reflect the instrument's quote (spec §8.7, §10): its key backs off. */
-const QUOTE_ABORT_STAGES: ReadonlySet<string> = new Set(['requote', 'price-floor', 'gas', 'guard']);
-/** Guard checks about the state rather than the quote (fresh gates, the strike against spot): no backoff. */
-const STATE_CHECK_IDS: ReadonlySet<string> = new Set(['C2', 'C10']);
 
 /**
  * The daemon loop (spec §9.1), at a fixed delay: a tick, then `tickSeconds` of sleep, so a slow trade never
@@ -144,7 +141,11 @@ async function tick(deps: LoopDeps, config: AppConfig, run: Run): Promise<boolea
   if (deps.signal.aborted) return false;
 
   const io = { deps, config };
-  resolveWaits(memo, fetched, c, { log: deps.log, record: (stream, r) => record(io, stream, r) });
+  resolveWaits(memo, fetched, c, {
+    log: deps.log,
+    record: (stream, r) => record(io, stream, r),
+    writeStop: (reason) => deps.writeStop(reason),
+  });
   memo.forgetExpiredKeys(fetched.nowSec);
   const st = deriveState({ ...fetched, memo: memo.snapshotMemo() }, c);
   memo.observePendingSettlement(
@@ -349,11 +350,9 @@ function completesExecution(c: WheelConfig, result: TradeResult): boolean {
 }
 
 /**
- * Key backoff (spec §8.7, §10) for an execution that aborted before the confirm on its quote: the re-quote failed,
- * came in under `minPriceE18`, its gas failed, or a guard other than C2 (the fresh state) and C10 (the strike
- * against spot) refused it. Such an abort repeats on the next tick's identical plan, so the key waits like a
- * below-floor quote's, a custom strike's included (it has no indicative APR, so only a spot move resets it). Returns
- * what was backed off.
+ * Key backoff (spec §8.7, §10) for an execution that `abortedOnQuote`: such an abort repeats on the next tick's
+ * identical plan, so the key waits like a below-floor quote's, a custom strike's included (it has no indicative APR,
+ * so only a spot move resets it). Returns what was backed off.
  */
 function backOffExecuted(
   t: Tick,
@@ -361,10 +360,7 @@ function backOffExecuted(
   result: TradeResult,
   nowSec: number,
 ): { key: string; untilSec: number; n: number } | null {
-  if (result.status !== 'aborted' || !QUOTE_ABORT_STAGES.has(result.stage)) return null;
-  if (result.stage === 'guard' && result.checkId !== undefined && STATE_CHECK_IDS.has(result.checkId)) {
-    return null;
-  }
+  if (!abortedOnQuote(result)) return null;
   const { memo } = t.deps;
   const key = candidateKey(candidate);
   memo.backoffKey(key, nowSec, t.s.market.spotE8, candidate.indicativeApr);

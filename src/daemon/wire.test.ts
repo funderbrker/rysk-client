@@ -30,6 +30,7 @@ function config(scope: 'window' | 'all-listed', live = false): AppConfig {
   const raw = JSON.parse(readFileSync(EXAMPLE_PATH, 'utf8')) as Json & { call: { fallback: Json[string] } };
   raw.call.fallback.scope = scope;
   raw.call.fallback.minNetPremiumUsd = '2';
+  raw.basis = { ...raw.basis, anchor: { ts: 1760000000, qtyWhype: '100', basisUsd: '50' } };
   if (live) {
     (raw as Record<string, unknown>).mode = 'live';
     (raw.account as Record<string, unknown>).address = ANVIL0;

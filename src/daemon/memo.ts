@@ -26,6 +26,19 @@ export type TradeTerms = { isPut: boolean; strikeE8: bigint; expirySec: number; 
 /** A `filled` trade whose row the positions API does not list yet. */
 export type PendingVisibility = { side: Side; txHash: Hex; sinceSec: number };
 
+/**
+ * A `confirm-rejected` result watched for the fill its error reply denied (spec §7.5): a row with its terms created
+ * at or after the confirm, which halts live. It holds nothing and ends silently after `unknownMaxWaitSec`, or at the
+ * next sent confirm on the same trade (side and terms), whose row it must not take.
+ */
+export type RejectedWatch = {
+  side: Side;
+  /** Server seconds when the confirm was sent. */
+  confirmSentAtSec: number;
+  sinceSec: number;
+  terms: TradeTerms;
+};
+
 /** An `unknown` result waiting for evidence that it filled (spec §7.5). */
 export type UnknownWait = {
   side: Side;
@@ -84,10 +97,12 @@ export class Memo implements SnapshotMemo {
   revertsSec: number[] = [];
   pendingVisibility: PendingVisibility[] = [];
   unknownWaits: UnknownWait[] = [];
+  rejectedWatches: RejectedWatch[] = [];
   /** Set by a fatal event; live never executes again in this process. */
   haltedLive = false;
   readonly startedAtMs: number;
-  aprEchoDisagreements = 0;
+  /** When C7 APR echo disagreements happened, chain seconds: two within an hour halt live. */
+  aprEchoDisagreementsSec: number[] = [];
   /** `localMs − serverMs` at the latest REST response with a `Date` header; `null` before the first. */
   restSkewMs: number | null = null;
 

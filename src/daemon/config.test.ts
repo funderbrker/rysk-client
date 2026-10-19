@@ -13,15 +13,21 @@ const EXAMPLE_PATH = fileURLToPath(new URL('../../config.example.json', import.m
 const EXAMPLE_TEXT = readFileSync(EXAMPLE_PATH, 'utf8');
 const DRY = { live: false };
 const LIVE = { live: true };
+/** The read-only commands' flags: the anchor rule, which refuses the example's zero anchor, is off. */
+const READ_ONLY = { live: false, requireAnchor: false };
 const E18 = 10n ** 18n;
 // The public Anvil #0 account, as in the keystore fixture.
 const ANVIL0 = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266';
 
 type Json = { [key: string]: unknown };
 
-/** The example's JSON with `changes` applied: dotted path → new value; `undefined` deletes the key. */
+/**
+ * The example's JSON with `changes` applied: dotted path → new value; `undefined` deletes the key. The zero anchor
+ * is replaced first by a filled-in one, so the result is valid for `run`; a change to `basis.anchor` wins.
+ */
 function exampleWith(changes: Record<string, unknown> = {}): Json {
   const config = JSON.parse(EXAMPLE_TEXT) as Json;
+  (config.basis as Json).anchor = { ts: 1760000000, qtyWhype: '100', basisUsd: '42' };
   for (const [path, value] of Object.entries(changes)) {
     const keys = path.split('.');
     const last = keys.pop() ?? '';
@@ -59,7 +65,7 @@ afterEach(() => {
 
 describe('loadConfig on config.example.json', () => {
   it('normalizes units at the boundary', () => {
-    const config = loadConfig(EXAMPLE_PATH, DRY);
+    const config = loadConfig(EXAMPLE_PATH, READ_ONLY);
 
     expect(config.mode).toBe('dry-run');
     expect(config.wheel.put.minApr).toBe(0.4);
@@ -67,7 +73,7 @@ describe('loadConfig on config.example.json', () => {
     expect(config.wheel.put.reserve6).toBe(0n);
     expect(config.wheel.safety.maxNotionalPer24h6).toBe(20000_000000n);
     expect(config.wheel.safety.minNativeHypeE18).toBe(5n * 10n ** 16n);
-    expect(config.wheel.basis.anchor.basisE8).toBe(5000000000n);
+    expect(config.wheel.basis.anchor).toEqual({ ts: 0, qtyE18: 0n, basisE8: 0n });
     expect(config.wheel.safety.maxGasFee6).toBe(500000n);
     expect(config.wheel.call.fallback.minNetPremium6).toBe(1_000000n);
     expect(config.wheel.put.maxCapital6).toBeUndefined();
@@ -106,7 +112,7 @@ describe('loadConfig on config.example.json', () => {
       },
       tranche: { allowSingleLot: true },
       basis: {
-        anchor: { ts: 1760000000, qtyE18: 100n * E18, basisE8: 50_00000000n },
+        anchor: { ts: 0, qtyE18: 0n, basisE8: 0n },
         externalFlows: [],
         residualPolicy: 'absorb',
         residualToleranceE18: 10n ** 12n,
@@ -127,7 +133,8 @@ describe('loadConfig on config.example.json', () => {
         maxQuoteTtlSec: 600,
         maxPremiumFractionOfCollateral: 0.15,
         aprEchoTolerancePp: 1,
-        verifyMakerSig: 'warn',
+        aprEchoToleranceRelPct: 0.05,
+        verifyMakerSig: 'enforce',
         maxClockSkewMs: 3000,
         startupQuietSec: 600,
         settlementGraceSec: 900,
@@ -143,7 +150,7 @@ describe('loadConfig on config.example.json', () => {
       },
     };
 
-    expect(loadConfig(EXAMPLE_PATH, DRY)).toEqual({
+    expect(loadConfig(EXAMPLE_PATH, READ_ONLY)).toEqual({
       mode: 'dry-run',
       account: { address: zeroAddress, keystorePath: 'keystore/wheel' },
       rpcUrl: 'https://rpc.hyperliquid.xyz/evm',
@@ -178,11 +185,11 @@ describe('loadConfig on config.example.json', () => {
   });
 
   it('resolves the sampled call collaterals to 4 addresses', () => {
-    expect(loadConfig(EXAMPLE_PATH, DRY).sampler.callCollaterals).toHaveLength(4);
+    expect(loadConfig(EXAMPLE_PATH, READ_ONLY).sampler.callCollaterals).toHaveLength(4);
   });
 
   it('throws ConfigError for --live when the file says dry-run', () => {
-    expect(configError(() => loadConfig(EXAMPLE_PATH, LIVE)).path).toBe('mode');
+    expect(configError(() => loadConfig(writeTemp(exampleWith()), LIVE)).path).toBe('mode');
   });
 });
 
@@ -206,6 +213,14 @@ describe('mode resolution', () => {
 
   it('refuses a live run on the zero address', () => {
     expect(configError(() => parseConfig(exampleWith({ mode: 'live' }), LIVE)).path).toBe('account.address');
+  });
+
+  it('refuses a live run under verifyMakerSig "warn", which dry-run allows', () => {
+    const warn = { mode: 'live', 'account.address': ANVIL0, 'safety.verifyMakerSig': 'warn' };
+    const error = configError(() => parseConfig(exampleWith(warn), LIVE));
+    expect(error.path).toBe('safety.verifyMakerSig');
+    expect(error.message).toContain('"enforce"');
+    expect(parseConfig(exampleWith(warn), DRY).wheel.safety.verifyMakerSig).toBe('warn');
   });
 
   it('never reads maxTrades from the file', () => {
@@ -239,7 +254,21 @@ describe('basis anchor (spec §8.4)', () => {
     expect(configError(() => loadConfig(writeTemp(raw), DRY)).path).toBe('basis.anchor.ts');
   });
 
-  it('accepts the zero placeholder anchor while calls are disabled', () => {
+  it("refuses config.example.json's zero anchor for run, and a half-filled one, while calls are enabled", () => {
+    const error = configError(() => loadConfig(EXAMPLE_PATH, DRY));
+    expect(error.path).toBe('basis.anchor.ts');
+    expect(error.message).toContain('rysk basis suggest-anchor');
+    // `ts` and `qtyWhype` copied from `suggest-anchor`, `basisUsd` not yet set.
+    const halfFilled = exampleWith({ 'basis.anchor': { ts: 1760000000, qtyWhype: '100', basisUsd: '0' } });
+    expect(configError(() => parseConfig(halfFilled, DRY)).path).toBe('basis.anchor.basisUsd');
+    expect(loadConfig(EXAMPLE_PATH, READ_ONLY).wheel.basis.anchor).toEqual({
+      ts: 0,
+      qtyE18: 0n,
+      basisE8: 0n,
+    });
+  });
+
+  it('accepts the zero anchor while calls are disabled', () => {
     const zeroAnchor = { ts: 0, qtyWhype: '0', basisUsd: '0' };
     const config = parseConfig(exampleWith({ 'call.enabled': false, 'basis.anchor': zeroAnchor }), DRY);
     expect(config.wheel.basis.anchor).toEqual({ ts: 0, qtyE18: 0n, basisE8: 0n });
@@ -396,6 +425,7 @@ const PCT_FIELDS = [
   'call.minOtmPct',
   'call.minStrikeOverBasisPct',
   'call.fallback.maxDiscountToBasisPct',
+  'safety.aprEchoToleranceRelPct',
   'safety.maxHypeExposurePct',
 ];
 
@@ -436,6 +466,7 @@ const INVALID: Invalid[] = [
   ['tickSeconds below 5', { tickSeconds: 4 }, 'tickSeconds'],
   ...POSITIVE_FIELDS.map((field): Invalid => [`${field} 0`, { [field]: 0 }, field]),
   ['minQuoteTtlSec above maxQuoteTtlSec', { 'safety.minQuoteTtlSec': 601 }, 'safety.minQuoteTtlSec'],
+  ['aprEchoTolerancePp 0', { 'safety.aprEchoTolerancePp': 0 }, 'safety.aprEchoTolerancePp'],
   ...PCT_FIELDS.flatMap((field): Invalid[] => [
     [`${field} above 100 %`, { [field]: 101 }, field],
     [`a negative ${field}`, { [field]: -1 }, field],

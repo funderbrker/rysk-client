@@ -1,5 +1,5 @@
 import type { Hex } from 'viem';
-import type { Position, Side } from '../domain/types.ts';
+import type { Side } from '../domain/types.ts';
 import { isAprEchoDisagreement } from '../execution/checks.ts';
 import type { TradeResult } from '../execution/types.ts';
 import type { WheelConfig } from '../strategy/wheel/config.ts';
@@ -22,23 +22,26 @@ export type TradeContext = HaltEffects & {
   counterBefore: bigint;
 };
 
-/** What `resolveWaits` reports through; `record` never throws. */
-export type WaitEffects = { log: Log; record(stream: RecordStream, record: object): void };
+/** What `resolveWaits` reports through (`record` never throws), and halts through. */
+export type WaitEffects = HaltEffects & { record(stream: RecordStream, record: object): void };
 
 const RETRY_COOLDOWN_SEC = 60;
 const CONFIRM_ERROR_WINDOW_SEC = 3_600;
 const MAX_CONFIRM_ERRORS = 3;
 const REVERT_WINDOW_SEC = 86_400;
 const MAX_REVERTS = 2;
+const APR_ECHO_WINDOW_SEC = 3_600;
 const MAX_APR_ECHO_DISAGREEMENTS = 2;
 
 /**
  * Applies one execution result to the side's cooldown (spec §7.5) and the halt rules (spec §9.4, §10):
  *
- * - `aborted` before the confirm: no cooldown. The second C7 APR echo disagreement halts live; an `echo` abort in
- *   live halts (the execution already wrote STOP).
+ * - `aborted` before the confirm: no cooldown. Two C7 APR echo disagreements within an hour halt live; an `echo`
+ *   abort in live halts (the execution already wrote STOP).
  * - `aborted('confirm-rejected')` and `reverted`: 60 s, and `lastConfirmSec[side]` cleared so the DCA interval is
- *   not consumed; three confirm errors (either kind) within an hour, or two reverts within 24 h, halt live.
+ *   not consumed; three confirm errors (either kind) within an hour, or two reverts within 24 h, halt live. A
+ *   rejection is also watched for the fill its reply denied (`resolveWaits`); a later sent confirm on the same
+ *   trade (side and terms) ends that watch, since a row with those terms is the new confirm's from then on.
  * - `filled`: the side cools down until its `txHash` appears in the positions API, at most `unknownMaxWaitSec`.
  * - `unknown`: the side cools down until evidence that it filled (`resolveWaits`), at most `unknownMaxWaitSec`;
  *   `verify-failed` also halts live (the execution wrote STOP, or listed the failure).
@@ -53,18 +56,26 @@ export function applyTradeResult(
   c: WheelConfig,
   ctx: TradeContext,
 ): void {
-  for (const error of result.bookkeepingErrors ?? []) {
+  for (const error of 'bookkeepingErrors' in result ? result.bookkeepingErrors : []) {
     ctx.log.error({ side, error }, 'execution bookkeeping failed');
     if (error.startsWith('writeStop')) memo.haltedLive = true;
   }
+  if (result.status !== 'aborted') endRejectedWatch(memo, side, ctx.terms);
   switch (result.status) {
     case 'aborted':
       if (result.stage === 'confirm-rejected') {
         confirmFailed(memo, side, false, nowSec, c, ctx);
+        watchRejected(memo, side, result.confirmSentAtSec, nowSec, ctx.terms);
       } else if (result.stage === 'guard' && isAprEchoDisagreement(result)) {
-        memo.aprEchoDisagreements += 1;
-        if (memo.aprEchoDisagreements === MAX_APR_ECHO_DISAGREEMENTS) {
-          haltLive(memo, 'apr echo disagreement twice', c, ctx);
+        const recent = within(memo.aprEchoDisagreementsSec, nowSec, APR_ECHO_WINDOW_SEC);
+        memo.aprEchoDisagreementsSec = [...recent, nowSec];
+        if (memo.aprEchoDisagreementsSec.length >= MAX_APR_ECHO_DISAGREEMENTS) {
+          haltLive(
+            memo,
+            `${memo.aprEchoDisagreementsSec.length} apr echo disagreements within an hour`,
+            c,
+            ctx,
+          );
         }
       } else if (result.stage === 'echo' && c.mode === 'live') {
         memo.haltedLive = true;
@@ -122,7 +133,10 @@ export function haltLive(memo: Memo, reason: string, c: WheelConfig, fx: HaltEff
  * Each tick, before planning: clears a side's cooldown once its filled `txHash` appears in `s.positions`
  * (recording the visibility latency), or once an `unknown` result has evidence — a position created at or after
  * the confirm with the traded terms, or a vault counter above the one read before executing. A wait older than
- * `unknownMaxWaitSec` is dropped with an error (an `unknown` one also clears its cooldown).
+ * `unknownMaxWaitSec` is dropped with an error (an `unknown` one also clears its cooldown). A rejected confirm is
+ * watched as long, by position only (another trade may move the counter) and holding nothing: a matching row
+ * created at or after it is a fill its error reply denied, which went through no receipt verification, so it is
+ * recorded as `rejected-filled` and halts live (spec §10); without one the watch ends silently.
  */
 export function resolveWaits(memo: Memo, s: Snapshot, c: WheelConfig, fx: WaitEffects): void {
   const maxWaitSec = c.safety.unknownMaxWaitSec;
@@ -161,6 +175,50 @@ export function resolveWaits(memo: Memo, s: Snapshot, c: WheelConfig, fx: WaitEf
     fx.record('executions', { step: 'unknown-expired', side, waitedSec });
     return false;
   });
+  memo.rejectedWatches = memo.rejectedWatches.filter((watch) => {
+    const waitedSec = s.nowSec - watch.sinceSec;
+    const row = s.positions.find(
+      (p) => p.createdAtSec >= watch.confirmSentAtSec && sameTerms(p, watch.terms),
+    );
+    if (row === undefined) return waitedSec < maxWaitSec;
+    const detail = {
+      side: watch.side,
+      txHash: row.txHash,
+      waitedSec,
+      confirmSentAtSec: watch.confirmSentAtSec,
+    };
+    fx.record('executions', { step: 'rejected-filled', ...detail });
+    haltLive(memo, `rejected confirm filled anyway: ${row.txHash}`, c, fx);
+    return false;
+  });
+}
+
+/**
+ * Watches a rejected confirm for the fill its reply denied. A watch already on the same trade is replaced, keeping
+ * the earlier send: a row created between the two confirms is still one of them.
+ */
+function watchRejected(
+  memo: Memo,
+  side: Side,
+  confirmSentAtSec: number,
+  nowSec: number,
+  terms: TradeTerms,
+): void {
+  const earlier = memo.rejectedWatches.find((watch) => watch.side === side && sameTerms(watch.terms, terms));
+  endRejectedWatch(memo, side, terms);
+  memo.rejectedWatches.push({
+    side,
+    confirmSentAtSec: Math.min(confirmSentAtSec, earlier?.confirmSentAtSec ?? confirmSentAtSec),
+    sinceSec: nowSec,
+    terms,
+  });
+}
+
+/** A sent confirm on the same trade ends its rejected watch: a row with these terms is the new confirm's now. */
+function endRejectedWatch(memo: Memo, side: Side, terms: TradeTerms): void {
+  memo.rejectedWatches = memo.rejectedWatches.filter(
+    (watch) => !(watch.side === side && sameTerms(watch.terms, terms)),
+  );
 }
 
 function confirmFailed(
@@ -195,12 +253,13 @@ function evidenceOf(wait: UnknownWait, s: Snapshot): 'position' | 'vault-counter
   return s.chain.vaultCounter > wait.counterBefore ? 'vault-counter' : null;
 }
 
-function sameTerms(p: Position, t: TradeTerms): boolean {
+/** The same option and size; a `Position` carries these fields too. */
+function sameTerms(a: TradeTerms, b: TradeTerms): boolean {
   return (
-    p.isPut === t.isPut &&
-    p.strikeE8 === t.strikeE8 &&
-    p.expirySec === t.expirySec &&
-    p.quantityE18 === t.quantityE18
+    a.isPut === b.isPut &&
+    a.strikeE8 === b.strikeE8 &&
+    a.expirySec === b.expirySec &&
+    a.quantityE18 === b.quantityE18
   );
 }
 

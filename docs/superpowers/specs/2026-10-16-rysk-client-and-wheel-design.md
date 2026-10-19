@@ -221,7 +221,7 @@ viem `keccak256` for the MAC. It accepts files without `address` and hex without
 decryption; the key is never logged or serialized.
 
 Password resolution: hidden prompt on stderr when stdin is a TTY (`read`, `silent`); otherwise the file
-named by `KEYSTORE_PASSWORD_FILE`, refused if group- or world-readable; otherwise fail. A
+named by `KEYSTORE_PASSWORD_FILE`, refused if group- or world-readable, less one trailing line break; otherwise fail. A
 `KEYSTORE_PASSWORD` environment variable is deliberately unsupported. Only live mode loads the keystore;
 startup asserts the decrypted address equals `config.account.address` and that `getCode(address)` is
 empty (we hard-code `isEIP1271: false`). Startup also warns if `git ls-files keystore` lists anything.
@@ -256,8 +256,9 @@ nonce with +30 % fees (§1.2, §13).
 `verifyFillReceipt(receipt, expected)` decodes logs and checks: `status == 1`; `to == Rysk`; an ERC-20
 `Transfer` of the collateral token from `self` to `MarginPool` for exactly `collateralAmount`; a
 `Transfer` of USDC from `MMarket` to `self` for `premium6 − gasFee6` (±1 unit, warn if lower);
-`VaultOpened(owner = self)` from the vault store with `vaultId == counterBefore + 1`; `ShortOtokenMinted`
-amount `== quantityE18 / 10^10`; and no other `Transfer` from `self`. Structure verified on a real fill.
+`VaultOpened(owner = self)` from the vault store with `vaultId == counterBefore + 1`; `ShortOtokenMinted(owner =
+self)` from the Gamma controller (`0x577b…`) with amount `== quantityE18 / 10^10` into that vault; and no other
+`Transfer` from `self`. Structure and both emitters verified on a real fill.
 
 ## 6. Domain and Rysk layers
 
@@ -374,11 +375,11 @@ pinned, never read from a server `typeDataDomain`. `CONFIRMATION_TYPES` (17 fiel
 bundle) and `QUOTE_TYPES` (13 fields). `signConfirmation(account, message)` via viem `signTypedData`;
 `recoverQuoteSigner(quote)` via `recoverTypedDataAddress`; `makerSignatureOk(quote, recover)` returns `true` when
 it recovers the maker, `false` for anyone else or a rejection, `null` without a recoverer. It is recorded on every
-quote as `makerSigOk` and enforced only when `verifyMakerSig: 'enforce'` (default `'warn'`). Contract-maker
+quote as `makerSigOk` and enforced only when `verifyMakerSig: 'enforce'` (the example's default). Contract-maker
 (EIP-1271) signatures are not accepted in v1: the taker classifies a quote whose signature is not 65 bytes of hex
 as `mismatch` (§6.7), so it is never priced or executed in either mode. A 65-byte signature that does not recover
 the maker is `makerSigOk: false`: C5 rejects it only under `'enforce'`; under `'warn'` it is logged and the quote
-may trade, so live should run `'enforce'`. **live**: every captured maker signature recovers (the three spike
+may trade, so a live run is refused at config load unless `'enforce'` is set (§9.1). **live**: every captured maker signature recovers (the three spike
 quotes and every quote of the validation run), so the pinned domain is the makers' domain too. Tests:
 sign-and-recover with the key derived from the committed keystore fixture (no raw private key in the
 repo), and signer recovery on captured real quotes.
@@ -460,7 +461,7 @@ memory).
 | C4 | Quote echoes the request on every term field (§6.7). |
 | C5 | `maker ∉ {zero, self}`; `quoteNonce` not previously **signed** in-process (a nonce joins the used set at SIGN); `recoverQuoteSigner == maker` when `verifyMakerSig: 'enforce'` (under `'warn'` a 65-byte signature that does not recover passes with a recorded warning). A signature that is not 65 bytes (an EIP-1271 contract signature) never reaches the checklist: the taker records it as `mismatch` (§6.8). |
 | C6 | `minQuoteTtlSec ≤ validUntil − serverNowSec ≤ maxQuoteTtlSec (600)`, and `validUntil < expiry`. |
-| C7 | `price > 0`; `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral` (0.15); our APR (gas 0) within `aprEchoTolerancePp` (1.0 percentage point) of `quote.apy`. |
+| C7 | `price > 0`; `price / strike` (put) or `price / spot` (call) ≤ `maxPremiumFractionOfCollateral` (0.15); `quote.apy` finite; our APR (gas 0) within `aprEchoTolerancePp` (1.0 percentage point) of `quote.apy` for a put, and for a call within the larger of that and `aprEchoToleranceRelPct` (5 % of `quote.apy`). A put's collateral is its strike, which both sides price alike (the validation run's puts agreed exactly); a call's APR is priced at fresh spot while the maker priced `apy` moments earlier, so its tolerance scales with the APR: at 100 % a 1 pp disagreement is a 1 % move. |
 | C8 | Normal mode: `aprFraction(premium6 − gasFee6 from the GAS step, collateral6, serverNowSec, expiry) ≥ minApr`. Fallback: `net6 ≥ call.fallback.minNetPremium6`. Both: `net6 ≥ safety.minNetPremium6`. (`minPriceE18` is only the REQUOTE screen.) |
 | C9 | Gas echo (§7.3): every sent field equal by kind; extra keys ⊆ the known set with their expected values; `gasFee` a non-negative integer string with `gasFee6 × 10000 ≤ premium6 × maxGasFeeBps`, `gasFee6 ≤ maxGasFee6` (= `safety.maxGasFeeUsd` as 6 dp) and `gasFee6 ≤ intent.maxGasFee6` (the decision's bound). |
 | C10 | Strike vs fresh spot: put `K ∈ [0.6 S, S (1 − minOtmPct)]`, call `K ∈ [S (1 + minOtmPct), 1.4 S]` (the band is `STRIKE_BAND_MIN_BPS`/`STRIKE_BAND_MAX_BPS` in `domain/constants.ts`, which the planner also applies); `K % strikePrecision == 0`; `K` listed for that expiry in listings at most 5 min old (`nowMs − listingsAtMs ≤ 300 s`) unless the intent is a custom fallback strike. |
@@ -509,7 +510,7 @@ strike, usd, price, quantity`). The full body is used only inside `sellOption`.
 | result | cooldown on the side |
 |---|---|
 | `aborted` before confirm | none |
-| `aborted('confirm-rejected')`, `reverted` | 60 s; `memo.lastConfirmSec[side]` is cleared so the DCA interval is not consumed; three confirm errors (rejections and reverts) per hour or two reverts per 24 h → halt live |
+| `aborted('confirm-rejected')`, `reverted` | 60 s; `memo.lastConfirmSec[side]` is cleared so the DCA interval is not consumed; three confirm errors (rejections and reverts) per hour or two reverts per 24 h → halt live. A rejection is also watched (`memo.rejectedWatches`) for `unknownMaxWaitSec`, by position only (another trade may move the counter): a row with its terms and `createdAt ≥ confirmSentAtSec` is a fill the error reply denied, which went through no receipt verification, so it is recorded as `rejected-filled` and halts live (§10). The watch holds nothing and ends silently, or at the next sent confirm on the same trade (side and terms), whose row it must not take; a second rejection of the same trade replaces it, keeping the earlier send. |
 | `filled` | until the txHash appears in the positions API (max `unknownMaxWaitSec`, 1800); the cooldown is set to `sentAt + unknownMaxWaitSec` when the confirm is sent and lifted when the row is visible (`visible` record with the latency) |
 | `unknown` | until evidence: a matching row with `createdAt ≥ confirmSentAtSec`, or the vault counter increased (then verify); after `unknownMaxWaitSec` log error and unblock; never re-sign meanwhile |
 
@@ -610,8 +611,8 @@ residualPolicy: 'absorb' | 'block-calls', residualToleranceWhype }`, normalized 
 instant. When `call.enabled`, loading the config for `run` fails unless `anchor.ts > 0` and
 `anchor.basisUsd > 0` (a zero anchor would disable the basis rule); the read-only commands load it with
 `ConfigFlags.requireAnchor: false`, so `basis suggest-anchor` works before the anchor exists. The example ships
-a placeholder anchor (`ts 1760000000`, `qtyWhype "100"`, `basisUsd "50"`) so that it loads; operators replace
-it. If `anchor.ts` falls inside `[expiry, expiry + 6 h]` of any basis-relevant
+a zero anchor, which `run` refuses field by field while `call.enabled` (a half-filled anchor, `ts` and `qtyWhype`
+copied but `basisUsd` still 0, fails on `basisUsd`), so calls are never priced off a made-up basis. If `anchor.ts` falls inside `[expiry, expiry + 6 h]` of any basis-relevant
 row, the basis is unreliable with reason `anchor-in-settlement-window`. `rysk basis suggest-anchor` prints `{ ts: blockTs,
 qtyWhype: H_obs }` so the user supplies only the price.
 
@@ -789,12 +790,14 @@ error level.
 
 Halting live is an in-memory flag (`memo.haltedLive`; live never executes again in this process, STATUS shows
 `halted`) set by a `verify-failed` result, three confirm errors within an hour, two reverts within 24 h, a quote
-error matching `/geo|forbidden|restricted/i`, the second C7 APR-echo disagreement, an `aborted('echo')` in live, or
+error matching `/geo|forbidden|restricted/i`, two C7 APR-echo disagreements within an hour, a rejected confirm whose
+fill appears in the positions anyway (`rejected-filled`, §7.5), an `aborted('echo')` in live, or
 a failed STOP write among a result's `bookkeepingErrors`; each of the others also writes `STOP` and logs one
 `fatal` line. In dry-run the same events only log what live would do.
 
-Modes: default dry-run. Live requires `--live` **and** `mode: "live"` in config; `--live` with
-`mode: "dry-run"` exits with an error; `mode: "live"` without `--live` runs dry-run with a warning.
+Modes: default dry-run. Live requires `--live` **and** `mode: "live"` in config, a non-zero `account.address` and
+`safety.verifyMakerSig: "enforce"`; `--live` with `mode: "dry-run"` exits with an error, as does `--live` under
+`"warn"`; `mode: "live"` without `--live` runs dry-run with a warning.
 `--max-trades N` exits (code 0) after N completed executions for supervised early runs: in live every result whose
 confirm was sent (`filled`, `unknown` for any reason, `reverted`, `aborted('confirm-rejected')`), so a first
 `--max-trades 1` never sends a second confirm whatever the outcome of the first; in dry-run every
@@ -953,11 +956,11 @@ staleness check); data growth (measured, §9.3); and the go-live order before en
 |---|---|
 | No quote within 15 s; RPC error; late or mismatched reply | Recorded with its outcome; candidate skipped; key backoff. Cap or "cannot quote" errors → hold with reason; text suggesting geo or forbidden → halt live, continue dry-run. |
 | Socket closes mid-auction | Pending call rejects `socket-closed`; results from the old connection are discarded; reconnect with backoff. |
-| TTL out of bounds; `quote.apy` disagrees with our APR; maker signature does not recover | Not executable; recorded. Two APR disagreements → halt live. |
+| TTL out of bounds; `quote.apy` disagrees with our APR; maker signature does not recover | Not executable; recorded. Two APR disagreements within an hour → halt live. |
 | Executable re-quote below `minPriceE18` | `aborted('price-floor')`; allowance stays (harmless, exact, needs our signature); key backoff (§8.7). |
 | Execution aborts before the confirm on its quote (`requote`, `gas`, a guard but C2 and C10) | No side cooldown (nothing was sent); key backoff (§8.7), a custom strike's included, recorded in the `executions` result record. |
 | Gas: exceeds premium; echo mismatch; unknown extra key or value; fee over bound | Candidate skipped with key backoff, no side cooldown (nothing was sent); **echo mismatch or unknown key halts live**; fee over bound → hold `gas`. |
-| `confirm` rejected | Never retry the same quote or nonce; 60 s cooldown; three per hour → halt live. |
+| `confirm` rejected | Never retry the same quote or nonce; 60 s cooldown; three per hour → halt live. Watched for `unknownMaxWaitSec` for a row the reply denied: one appearing → `rejected-filled`, halt live (§7.5). |
 | Relayer tx reverts | Collateral unmoved; 60 s cooldown; two per 24 h → halt live. |
 | No confirm reply, socket closed, or receipt timeout | `unknown`: hold the side; resolve by API row or vault counter; after 1800 s log error and unblock; never re-sign meanwhile. |
 | Receipt amounts differ | Fatal: `STOP`, halt live. |
@@ -1005,7 +1008,8 @@ staleness check); data growth (measured, §9.3); and the go-live order before en
 2. Semantics of `validUntil` vs `quoteValidUntil`; whether the relayer enforces `validUntil`.
 3. Whether concurrent RFQs on one socket are allowed or last-wins; whether makers price `taker = self`
    differently from zero; whether the server validates `nonce` recency; cap `usage` semantics;
-   settlement-lag distribution; what `0x577b…` is versus the vault store.
+   settlement-lag distribution; what else the Gamma controller `0x577b…` does (in the verified fill it emitted
+   `ShortOtokenMinted`, which §5.4 pins to it, while the vault store emitted `VaultOpened`).
 4. Whether HyperEVM's `pending` block tag reflects mempool transactions. If it does not, `pendingNonce` always
    equals `latestNonce` and G8's `tx-pending` never fires (the exact-allowance rule keeps a repeated approve
    harmless).
@@ -1206,8 +1210,10 @@ export type TradeResult =                      // every post-send result lists i
   | { status: 'unknown'; reason: 'confirm-timeout' | 'socket-closed' | 'receipt-timeout' | 'shutdown' | 'bad-result' | 'verify-failed';
       confirmSentAtSec: number; txHash?: Hex; approveTxHash?: Hex; bookkeepingErrors: string[] }
   | { status: 'aborted'; stage: 'precheck' | 'approve' | 'requote' | 'price-floor' | 'gas' | 'echo' | 'guard' | 'sign'
-      | 'shutdown' | 'confirm-rejected' | 'dry-run'; message: string; checkId?: string; approveTxHash?: Hex;
-      echoOk?: boolean; wouldApprove?: bigint; bookkeepingErrors?: string[] };
+      | 'shutdown' | 'dry-run'; message: string; checkId?: string; approveTxHash?: Hex; echoOk?: boolean;
+      wouldApprove?: bigint }                     // before the send: no bookkeeping yet
+  | { status: 'aborted'; stage: 'confirm-rejected'; message: string; confirmSentAtSec: number; approveTxHash?: Hex;
+      bookkeepingErrors: string[] };             // the one abort after the send (§7.5 watch)
 sellOption(deps: TradeDeps, intent: TradeIntent): Promise<TradeResult>;
 runPreSignChecks(ctx: CheckContext): { ok: true; body: CheckedConfirmBody | null /* null in dry-run */; gasFee6: bigint;
   results: CheckResult[] } | { ok: false; failed: CheckResult; results: CheckResult[] };
@@ -1270,12 +1276,13 @@ wireDaemon(config: AppConfig, opts: WireOptions): Wired;
             "maxContractsPerTrade": 25, "reserveWhype": "0", "maxCapitalWhype": null, "minStrikeOverBasisPct": 0,
             "fallback": { "enabled": true, "scope": "window", "customStrikeFirst": false, "maxDiscountToBasisPct": null, "minNetPremiumUsd": "1" } },
   "tranche": { "allowSingleLot": true },
-  "basis": { "anchor": { "ts": 1760000000, "qtyWhype": "100", "basisUsd": "50" }, "externalFlows": [],
+  "basis": { "anchor": { "ts": 0, "qtyWhype": "0", "basisUsd": "0" }, "externalFlows": [],
              "residualPolicy": "absorb", "residualToleranceWhype": "0.000001" },
   "quoting": { "quotesPerSide": 3, "rfqTimeoutMs": 15000, "replanSec": 300, "prefilterRatio": 0.5,
                "strategyRfqPerMin": 12, "samplerRfqPerMin": 6 },
   "safety": { "maxGasFeeUsd": "0.5", "maxGasFeeBps": 200, "minNetPremiumUsd": "1", "minQuoteTtlSec": 15, "maxQuoteTtlSec": 600,
-              "maxPremiumFractionOfCollateral": 0.15, "aprEchoTolerancePp": 1.0, "verifyMakerSig": "warn",
+              "maxPremiumFractionOfCollateral": 0.15, "aprEchoTolerancePp": 1.0, "aprEchoToleranceRelPct": 5,
+              "verifyMakerSig": "enforce",
               "maxClockSkewMs": 3000, "startupQuietSec": 600, "settlementGraceSec": 900, "settlementOverdueHours": 6,
               "maxDeploymentsPer24h": 4, "maxNotionalPer24hUsd": "20000", "minNativeHype": "0.05",
               "maxFeePerGasGwei": 5, "confirmTimeoutMs": 60000, "unknownMaxWaitSec": 1800,
@@ -1287,6 +1294,7 @@ wireDaemon(config: AppConfig, opts: WireOptions): Wired;
 ```
 
 Human units are decimal strings converted by string arithmetic in the zod transform; `null` means unbounded;
-percent fields are named `*Pct` and converted to fractions at the boundary (§8.9). The anchor is a placeholder
-that lets the example load with calls enabled; replace it with `rysk basis suggest-anchor`'s output and the real
-`basisUsd`. The committed file is formatted by biome (one key per line); its content is the above.
+percent fields are named `*Pct` and converted to fractions at the boundary (§8.9). The anchor is zero, which the
+read-only commands load and `run` refuses while calls are enabled (§8.4); fill it in with `rysk basis
+suggest-anchor`'s output and the real `basisUsd`. The committed file is formatted by biome (one key per line); its
+content is the above.

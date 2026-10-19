@@ -17,6 +17,7 @@ type ExecutionSafetyKeys =
   | 'maxQuoteTtlSec'
   | 'maxPremiumFractionOfCollateral'
   | 'aprEchoTolerancePp'
+  | 'aprEchoToleranceRelPct'
   | 'verifyMakerSig'
   | 'maxDeploymentsPer24h'
   | 'maxNotionalPer24h6'

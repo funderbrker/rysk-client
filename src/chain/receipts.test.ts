@@ -133,6 +133,15 @@ describe('verifyFillReceipt', () => {
     expect(problemsOf({ ...receipt, logs })).toEqual(['vault-opened']);
   });
 
+  it('flags a short mint not emitted by the Gamma controller', () => {
+    const receipt = fixtureReceipt();
+    const logs = receipt.logs.map((log) =>
+      isAddressEqual(log.address, ADDRESSES.controller) ? { ...log, address: STRANGER } : log,
+    );
+
+    expect(problemsOf({ ...receipt, logs })).toEqual(['short-minted']);
+  });
+
   it('reports only the revert for a reverted receipt', () => {
     const reverted: TransactionReceipt = { ...fixtureReceipt(), status: 'reverted' };
 

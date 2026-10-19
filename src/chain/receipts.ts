@@ -36,7 +36,7 @@ export type FillVerification =
 
 type Transfer = { log: Log; token: Address; from: Address; to: Address; value: bigint };
 type VaultOpened = { emitter: Address; accountOwner: Address; vaultId: bigint };
-type ShortMinted = { accountOwner: Address; vaultId: bigint; amount: bigint };
+type ShortMinted = { emitter: Address; accountOwner: Address; vaultId: bigint; amount: bigint };
 type FillEvents = { transfers: Transfer[]; vaultsOpened: VaultOpened[]; shortsMinted: ShortMinted[] };
 
 const FILL_EVENTS_ABI = [...transferEventAbi, ...vaultOpenedEventAbi, ...shortOtokenMintedEventAbi];
@@ -50,7 +50,8 @@ const PREMIUM_TOLERANCE6 = 1n;
 /**
  * Checks a mined fill against what the seller signed (spec §5.4): the transaction went to Rysk, `self`
  * paid exactly the collateral into the MarginPool and nothing else, received the net premium in USDC,
- * opened vault `counterBefore + 1` and minted the matching short into it. Every problem is collected,
+ * opened vault `counterBefore + 1` (the vault store's event) and had the Gamma controller mint the matching
+ * short into it. Every problem is collected,
  * except that a revert is reported alone. Logs that decode as none of the expected events are ignored, but
  * any log carrying the `Transfer` selector with `from == self` counts toward `extra-transfer-from-self`,
  * whatever its layout.
@@ -94,7 +95,11 @@ export function verifyFillReceipt(receipt: TransactionReceipt, expected: FillExp
   );
   if (vault === undefined || vault.vaultId !== expected.counterBefore + 1n) problems.push('vault-opened');
 
-  const short = only(shortsMinted.filter((s) => isAddressEqual(s.accountOwner, self)));
+  const short = only(
+    shortsMinted.filter(
+      (s) => isAddressEqual(s.emitter, ADDRESSES.controller) && isAddressEqual(s.accountOwner, self),
+    ),
+  );
   // Without a single opened vault `vault-opened` already fails the fill, so only the amount is judged then.
   if (
     short === undefined ||
@@ -136,6 +141,7 @@ function decodeFillEvents(logs: readonly Log[]): FillEvents {
         break;
       case 'ShortOtokenMinted':
         events.shortsMinted.push({
+          emitter: log.address,
           accountOwner: decoded.args.AccountOwner,
           vaultId: decoded.args.vaultId,
           amount: decoded.args.amount,

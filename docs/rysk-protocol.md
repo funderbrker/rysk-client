@@ -527,7 +527,7 @@ Rules for a client:
 | Rysk | `0x8C8bcb6D2c0E31c5789253EcC8431cA6209B4E35` | Transaction processor; EIP-712 `verifyingContract`; target of relayer txs | `docs` `bundle` `live` |
 | MarginPool | `0x24a44f1dc25540c62c1196FfC297dFC951C91aB4` | Collateral storage; **`approve` spender** | `docs` `bundle` `live` |
 | MMarket | `0x691a5fc3a81a144e36c6C4fBCa1fC82843c80d0d` | Maker accounting; pays premium; holds oTokens | `docs` `bundle` `live` |
-| Gamma controller / self-redeem | `0x577b846a95711015769452f7f29d8054cf087964` | `redeemTimePeriod()`; emits events in trade txs | `bundle` `live` |
+| Gamma controller / self-redeem | `0x577b846a95711015769452f7f29d8054cf087964` | `redeemTimePeriod()`; emits `CollateralAssetDeposited` and `ShortOtokenMinted` in a fill | `bundle` `live` |
 | Relayer EOA | `0x65802cc308aea8bb913882696c2df6bf23ff9e48` | Sender of the observed trade tx (pays its gas) | `live` |
 | Maker-fee recipient | `0xfb69f38eae27705720eb4aabb04be9edbec5b555` | Received the maker fee in the observed fill | `live` |
 
@@ -565,7 +565,7 @@ Source: `live`, the receipt of a real put fill of the §10.2 terms. Amounts are 
 | 4 | USDC Transfer MMarket → seller (premium) | about 47.5 USDC, exactly `quantity x price` truncated to 6 dp |
 | 5 | USDC Transfer MMarket → fee recipient (maker fee) | about 5.9 USDC, 12.5 % of the premium |
 
-The Gamma controller, the MarginPool and one other contract also emit events. A seller who already has the allowance sends no transaction for a trade at all.
+The Gamma controller emits `CollateralAssetDeposited` and `ShortOtokenMinted(otoken, AccountOwner = seller, to, vaultId, amount)` for the seller's new vault; the vault store emits `VaultOpened`; the MarginPool and one other contract also emit events. A seller who already has the allowance sends no transaction for a trade at all.
 
 ## 13. Operational constraints
 

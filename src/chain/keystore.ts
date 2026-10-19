@@ -99,8 +99,9 @@ type PasswordSources = {
 };
 
 /**
- * Prompts when stdin is a TTY; otherwise reads `KEYSTORE_PASSWORD_FILE`, refused unless owner-only.
- * A `KEYSTORE_PASSWORD` environment variable is deliberately unsupported.
+ * Prompts when stdin is a TTY; otherwise reads `KEYSTORE_PASSWORD_FILE`, refused unless owner-only, less one
+ * trailing line break (editors and `echo` add one); any other whitespace is the password's. A `KEYSTORE_PASSWORD`
+ * environment variable is deliberately unsupported.
  */
 export async function resolvePassword(opts: PasswordSources): Promise<string> {
   if (opts.isTTY) return opts.prompt('Keystore password: ');
@@ -113,5 +114,5 @@ export async function resolvePassword(opts: PasswordSources): Promise<string> {
       `KEYSTORE_PASSWORD_FILE ${path} is accessible by group or others (mode ${mode}); run chmod 600 on it`,
     );
   }
-  return opts.readFile(path).trim();
+  return opts.readFile(path).replace(/\r?\n$/, '');
 }

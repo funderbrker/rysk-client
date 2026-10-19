@@ -24,6 +24,11 @@ const PINNED: { name: string; actual: Address; expected: Address }[] = [
     expected: '0x84d84e481b49b8bc5a55f17aaf8181c21a29b212',
   },
   {
+    name: 'controller',
+    actual: ADDRESSES.controller,
+    expected: '0x577b846a95711015769452f7f29d8054cf087964',
+  },
+  {
     name: 'multicall3',
     actual: ADDRESSES.multicall3,
     expected: '0xca11bde05977b3631167028862be2a173976ca11',

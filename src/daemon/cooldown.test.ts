@@ -25,7 +25,9 @@ function context(patch: Partial<TradeContext> = {}): TradeContext {
   };
 }
 
-function aborted(stage: Extract<TradeResult, { status: 'aborted' }>['stage'], extra = {}): TradeResult {
+type PreSendStage = Exclude<Extract<TradeResult, { status: 'aborted' }>['stage'], 'confirm-rejected'>;
+
+function aborted(stage: PreSendStage, extra = {}): TradeResult {
   return { status: 'aborted', stage, message: `${stage} failed`, ...extra };
 }
 
@@ -34,14 +36,18 @@ const rejected: TradeResult = {
   stage: 'confirm-rejected',
   message: 'confirm rejected (-32000): no',
   bookkeepingErrors: [],
+  confirmSentAtSec: NOW_SEC - 5,
 };
 const reverted: TradeResult = { status: 'reverted', txHash: TX, bookkeepingErrors: [] };
 
-function unknown(reason: Extract<TradeResult, { status: 'unknown' }>['reason']): TradeResult {
+type Unknown = Extract<TradeResult, { status: 'unknown' }>;
+type Filled = Extract<TradeResult, { status: 'filled' }>;
+
+function unknown(reason: Unknown['reason']): Unknown {
   return { status: 'unknown', reason, confirmSentAtSec: NOW_SEC - 5, bookkeepingErrors: [] };
 }
 
-function filled(txHash: Hex = TX): TradeResult {
+function filled(txHash: Hex = TX): Filled {
   const quote = {} as Extract<TradeResult, { status: 'filled' }>['quote'];
   return { status: 'filled', txHash, quote, premium6: 37_500000n, gasFee6: 10_000n, bookkeepingErrors: [] };
 }
@@ -188,12 +194,12 @@ describe('applyTradeResult: §7.5 cooldowns', () => {
     expect(other.haltedLive).toBe(true);
   });
 
-  it('halts live on the second APR echo disagreement, not on other C7 failures', () => {
+  it('halts live on the second APR echo disagreement within an hour, not on other C7 failures', () => {
     const memo = new Memo(0);
     const ctx = context();
     const echo = aborted('guard', {
       checkId: 'C7',
-      message: 'our APR 0.75 vs quoted 0.774: more than 1 pp apart',
+      message: 'our APR 0.75 vs quoted 0.774: more than 1 pp and 5 % of the quote apart',
     });
     applyTradeResult(
       memo,
@@ -204,13 +210,24 @@ describe('applyTradeResult: §7.5 cooldowns', () => {
       ctx,
     );
     applyTradeResult(memo, 'put', echo, NOW_SEC, c, ctx);
-    expect(memo.aprEchoDisagreements).toBe(1);
+    expect(memo.aprEchoDisagreementsSec).toEqual([NOW_SEC]);
     expect(memo.haltedLive).toBe(false);
     applyTradeResult(memo, 'call', echo, NOW_SEC + 60, c, ctx);
-    expect(memo.aprEchoDisagreements).toBe(2);
-    expect(ctx.writeStop).toHaveBeenCalledExactlyOnceWith('apr echo disagreement twice');
+    expect(memo.aprEchoDisagreementsSec).toEqual([NOW_SEC, NOW_SEC + 60]);
+    expect(ctx.writeStop).toHaveBeenCalledExactlyOnceWith('2 apr echo disagreements within an hour');
     expect(memo.haltedLive).toBe(true);
     expect(memo.cooldownUntilSec).toEqual({});
+  });
+
+  it('forgets an APR echo disagreement after an hour: one a day never halts', () => {
+    const memo = new Memo(0);
+    const ctx = context();
+    const echo = aborted('guard', { checkId: 'C7', message: 'our APR 0.75 vs quoted 0.774: apart' });
+    applyTradeResult(memo, 'put', echo, NOW_SEC, c, ctx);
+    applyTradeResult(memo, 'call', echo, NOW_SEC + 3600, c, ctx);
+    expect(memo.aprEchoDisagreementsSec).toEqual([NOW_SEC + 3600]);
+    expect(memo.haltedLive).toBe(false);
+    expect(ctx.writeStop).not.toHaveBeenCalled();
   });
 
   it('dry-run never writes STOP: it logs what live would have halted on', () => {
@@ -218,7 +235,7 @@ describe('applyTradeResult: §7.5 cooldowns', () => {
     const ctx = context();
     const echo = aborted('guard', {
       checkId: 'C7',
-      message: 'our APR 0.75 vs quoted 0.774: more than 1 pp apart',
+      message: 'our APR 0.75 vs quoted 0.774: more than 1 pp and 5 % of the quote apart',
     });
     applyTradeResult(memo, 'put', echo, NOW_SEC, dry, ctx);
     applyTradeResult(memo, 'put', echo, NOW_SEC, dry, ctx);
@@ -241,6 +258,7 @@ describe('resolveWaits', () => {
     return {
       log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
       record: vi.fn(),
+      writeStop: vi.fn(),
     };
   }
 
@@ -333,6 +351,104 @@ describe('resolveWaits', () => {
       'executions',
       expect.objectContaining({ step: 'unknown-resolved', evidence: 'vault-counter' }),
     );
+  });
+
+  describe('a rejected confirm', () => {
+    const terms = {
+      isPut: true,
+      strikeE8: TERMS.strikeE8,
+      expirySec: TERMS.expirySec,
+      quantityE18: TERMS.quantityE18,
+    };
+
+    it('is watched by position only, keeping its 60 s cooldown; a fill its reply denied halts live', () => {
+      const memo = trading();
+      applyTradeResult(memo, 'put', rejected, NOW_SEC, c, context());
+      expect(memo.rejectedWatches).toEqual([
+        { side: 'put', confirmSentAtSec: NOW_SEC - 5, sinceSec: NOW_SEC, terms: TERMS },
+      ]);
+      const effects = io();
+
+      // An older row with the same terms, a newer one with other terms and a higher counter prove nothing.
+      const older = position({ ...terms, createdAtSec: NOW_SEC - 6, txHash: OTHER_TX });
+      const otherTerms = position({
+        ...terms,
+        quantityE18: 50n * E18,
+        createdAtSec: NOW_SEC,
+        txHash: OTHER_TX,
+      });
+      resolveWaits(
+        memo,
+        tickAt(NOW_SEC + 30, { positions: [older, otherTerms], vaultCounter: 88n }),
+        c,
+        effects,
+      );
+      expect(memo.rejectedWatches).toHaveLength(1);
+      expect(effects.record).not.toHaveBeenCalled();
+
+      const ours = position({ ...terms, createdAtSec: NOW_SEC - 4, txHash: TX });
+      resolveWaits(memo, tickAt(NOW_SEC + 90, { positions: [older, ours] }), c, effects);
+      expect(memo.rejectedWatches).toEqual([]);
+      expect(memo.cooldownUntilSec.put).toBe(NOW_SEC + 60);
+      expect(effects.record).toHaveBeenCalledExactlyOnceWith(
+        'executions',
+        expect.objectContaining({ step: 'rejected-filled', side: 'put', txHash: TX, waitedSec: 90 }),
+      );
+      expect(memo.haltedLive).toBe(true);
+      expect(effects.writeStop).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(TX));
+      expect(effects.log.fatal).toHaveBeenCalledOnce();
+    });
+
+    it('ends silently after unknownMaxWaitSec without a matching row', () => {
+      const memo = trading();
+      applyTradeResult(memo, 'put', rejected, NOW_SEC, c, context());
+      const effects = io();
+      resolveWaits(memo, tickAt(NOW_SEC + 1799), c, effects);
+      expect(memo.rejectedWatches).toHaveLength(1);
+      resolveWaits(memo, tickAt(NOW_SEC + 1800), c, effects);
+      expect(memo.rejectedWatches).toEqual([]);
+      expect(effects.record).not.toHaveBeenCalled();
+      expect(effects.log.error).not.toHaveBeenCalled();
+    });
+
+    it('ends at the next sent confirm on the same trade only, whose row it must not take as evidence', () => {
+      const memo = trading();
+      const otherTerms = { ...TERMS, strikeE8: 7500000000n };
+      applyTradeResult(memo, 'put', rejected, NOW_SEC, c, context());
+      // Other trades on the side, and aborts before a send, leave it alone.
+      applyTradeResult(memo, 'put', filled(), NOW_SEC + 70, c, context({ terms: otherTerms }));
+      applyTradeResult(memo, 'put', aborted('gas'), NOW_SEC + 80, c, context());
+      expect(memo.rejectedWatches).toHaveLength(1);
+      applyTradeResult(memo, 'put', unknown('confirm-timeout'), NOW_SEC + 140, c, context());
+      expect(memo.rejectedWatches).toEqual([]);
+    });
+
+    it('is kept beside the watch of a different trade rejected on the same side, and still halts on its row', () => {
+      const memo = trading();
+      const otherTerms = { ...TERMS, strikeE8: 7500000000n };
+      applyTradeResult(memo, 'put', rejected, NOW_SEC, c, context());
+      const later = { ...rejected, confirmSentAtSec: NOW_SEC + 95 } as TradeResult;
+      applyTradeResult(memo, 'put', later, NOW_SEC + 100, c, context({ terms: otherTerms }));
+      expect(memo.rejectedWatches.map((w) => [w.terms.strikeE8, w.confirmSentAtSec])).toEqual([
+        [TERMS.strikeE8, NOW_SEC - 5],
+        [otherTerms.strikeE8, NOW_SEC + 95],
+      ]);
+      const effects = io();
+      const ours = position({ ...terms, createdAtSec: NOW_SEC - 4, txHash: TX });
+      resolveWaits(memo, tickAt(NOW_SEC + 160, { positions: [ours] }), c, effects);
+      expect(memo.haltedLive).toBe(true);
+      expect(memo.rejectedWatches.map((w) => w.terms.strikeE8)).toEqual([otherTerms.strikeE8]);
+    });
+
+    it('is replaced by a second rejection of the same trade, keeping the earlier send', () => {
+      const memo = trading();
+      applyTradeResult(memo, 'put', rejected, NOW_SEC, c, context());
+      const later = { ...rejected, confirmSentAtSec: NOW_SEC + 95 } as TradeResult;
+      applyTradeResult(memo, 'put', later, NOW_SEC + 100, c, context());
+      expect(memo.rejectedWatches).toEqual([
+        { side: 'put', confirmSentAtSec: NOW_SEC - 5, sinceSec: NOW_SEC + 100, terms: TERMS },
+      ]);
+    });
   });
 
   it('keeps the unknown cooldown until unknownMaxWaitSec, then logs an error and unblocks', () => {

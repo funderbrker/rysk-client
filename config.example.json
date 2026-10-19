@@ -49,7 +49,7 @@
   },
   "tranche": { "allowSingleLot": true },
   "basis": {
-    "anchor": { "ts": 1760000000, "qtyWhype": "100", "basisUsd": "50" },
+    "anchor": { "ts": 0, "qtyWhype": "0", "basisUsd": "0" },
     "externalFlows": [],
     "residualPolicy": "absorb",
     "residualToleranceWhype": "0.000001"
@@ -70,7 +70,8 @@
     "maxQuoteTtlSec": 600,
     "maxPremiumFractionOfCollateral": 0.15,
     "aprEchoTolerancePp": 1.0,
-    "verifyMakerSig": "warn",
+    "aprEchoToleranceRelPct": 5,
+    "verifyMakerSig": "enforce",
     "maxClockSkewMs": 3000,
     "startupQuietSec": 600,
     "settlementGraceSec": 900,

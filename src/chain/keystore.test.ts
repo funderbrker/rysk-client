@@ -88,11 +88,20 @@ describe('resolvePassword', () => {
     expect(opts.readFile).not.toHaveBeenCalled();
   });
 
-  it('reads KEYSTORE_PASSWORD_FILE trimmed when it is owner-only', async () => {
+  it('reads KEYSTORE_PASSWORD_FILE less one trailing line break when it is owner-only', async () => {
     const opts = sources({ env: { KEYSTORE_PASSWORD_FILE: PASSWORD_FILE } });
-    await expect(resolvePassword(opts)).resolves.toBe('from-file');
+    await expect(resolvePassword(opts)).resolves.toBe(' from-file ');
     expect(opts.fileMode).toHaveBeenCalledWith(PASSWORD_FILE);
     expect(opts.readFile).toHaveBeenCalledWith(PASSWORD_FILE);
+  });
+
+  it.each([
+    ['a CRLF line break', 'pw\r\n', 'pw'],
+    ['no line break', 'pw', 'pw'],
+    ['a second line break, which is part of the password', 'pw\n\n', 'pw\n'],
+  ])('keeps everything but one trailing line break: %s', async (_what, content, password) => {
+    const opts = sources({ env: { KEYSTORE_PASSWORD_FILE: PASSWORD_FILE }, readFile: vi.fn(() => content) });
+    await expect(resolvePassword(opts)).resolves.toBe(password);
   });
 
   it('refuses a KEYSTORE_PASSWORD_FILE readable by group or others', async () => {

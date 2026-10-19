@@ -8,11 +8,13 @@ import { collateralForCall, collateralForPut, premium6 } from '../domain/units.t
 import { type ConfirmationMessage, hashConfirmation, toConfirmationMessage } from '../rysk/eip712.ts';
 import type { ConfirmReply } from '../rysk/taker.ts';
 import { buildConfirmBody, buildConfirmParams } from './body.ts';
-import { type CheckedConfirmBody, runPreSignChecks } from './checks.ts';
+import { type CheckedConfirmBody, failureBacksOffInstrument, runPreSignChecks } from './checks.ts';
 import { echoMismatches } from './echo.ts';
 import type { TradeDeps, TradeIntent, TradeResult } from './types.ts';
 
 type Aborted = Extract<TradeResult, { status: 'aborted' }>;
+/** An abort before the confirm was sent: every stage but `confirm-rejected`. */
+type PreSendAbort = Exclude<Aborted, { stage: 'confirm-rejected' }>;
 type UnknownReason = Extract<TradeResult, { status: 'unknown' }>['reason'];
 
 /** A terminal result. Steps return one (never throw it) to end the run. */
@@ -103,7 +105,7 @@ export async function sellOption(deps: TradeDeps, intent: TradeIntent): Promise<
 /** Runs a step before the confirm is sent: any error is a true abort at `stage`, since nothing was sent. */
 async function beforeSend<T>(
   run: Run,
-  stage: Aborted['stage'],
+  stage: PreSendAbort['stage'],
   step: () => Promise<T | Exit>,
 ): Promise<T | Exit> {
   try {
@@ -393,7 +395,14 @@ async function confirm(run: Run, signed: Signed): Promise<Confirmed | Exit> {
       // Code 0 is no JSON-RPC error code: a malformed error frame proves nothing about the confirm.
       if (reply.code === 0) return unknown(run, attempt, 'bad-result');
       bookkeep(run, 'onConfirmCleared', () => deps.onConfirmCleared(run.intent.side));
-      return abort(run, 'confirm-rejected', `confirm rejected (${reply.code}): ${reply.message}`);
+      return new Exit({
+        status: 'aborted',
+        stage: 'confirm-rejected',
+        message: `confirm rejected (${reply.code}): ${reply.message}`,
+        confirmSentAtSec: attempt.sentAtSec ?? attempt.atSec,
+        ...approveHashOf(run),
+        ...bookkeepingOf(run),
+      });
     case 'bad-result':
       return unknown(run, attempt, 'bad-result');
     case 'no-reply':
@@ -597,14 +606,18 @@ function approveHashOf(run: Run): { approveTxHash?: Hex } {
   return run.approveTxHash === undefined ? {} : { approveTxHash: run.approveTxHash };
 }
 
+/**
+ * An abort before the send (`run.attempt` is still null); the rejection after it builds its own result. Should a
+ * step ever call this once the attempt exists, the server may hold the signed body, so the outcome is `unknown`.
+ */
 function abort(
   run: Run,
-  stage: Aborted['stage'],
+  stage: PreSendAbort['stage'],
   message: string,
-  extra: Pick<Aborted, 'checkId' | 'echoOk'> = {},
+  extra: Pick<PreSendAbort, 'checkId' | 'echoOk'> = {},
 ): Exit {
-  const afterSend = run.attempt === null ? {} : bookkeepingOf(run);
-  return new Exit({ status: 'aborted', stage, message, ...extra, ...approveHashOf(run), ...afterSend });
+  if (run.attempt !== null) return unknown(run, run.attempt, 'bad-result');
+  return new Exit({ status: 'aborted', stage, message, ...extra, ...approveHashOf(run) });
 }
 
 function unknown(run: Run, attempt: Attempt, reason: UnknownReason, txHash?: Hex): Exit {
@@ -628,4 +641,21 @@ function messageOf(error: unknown): string {
   } catch {
     return 'unprintable error';
   }
+}
+
+/** The abort stages before the confirm that reflect the instrument's quote (a guard's unless its check is C2 or C10). */
+const QUOTE_ABORT_STAGES: ReadonlySet<Aborted['stage']> = new Set(['requote', 'price-floor', 'gas', 'guard']);
+
+/**
+ * Whether an aborted result reflects the instrument's quote rather than our state or timing (spec §8.7): the
+ * re-quote failed, came in under `minPriceE18`, its gas preview failed, or a guard other than C2 (the fresh state)
+ * and C10 (the strike against spot) refused it. Such an abort repeats on the next tick's identical plan, so the
+ * daemon backs the instrument off; an abort at `precheck`, `approve`, `echo`, `sign`, `shutdown` or after the send
+ * does not. A guard step that threw (no `checkId`, in practice a failed fresh-state read) backs off too: that is
+ * conservative, and costs one delayed retry of the instrument.
+
+ */
+export function abortedOnQuote(result: TradeResult): boolean {
+  if (result.status !== 'aborted' || !QUOTE_ABORT_STAGES.has(result.stage)) return false;
+  return result.stage !== 'guard' || failureBacksOffInstrument(result.checkId);
 }

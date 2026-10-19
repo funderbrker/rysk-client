@@ -110,6 +110,8 @@ export type SafetyConfig = {
   maxPremiumFractionOfCollateral: number;
   /** Percentage points, not a fraction. */
   aprEchoTolerancePp: number;
+  /** A FRACTION of the quoted `apy` (0.05 is 5 %), despite the name: the relative half of C7's tolerance, calls only. */
+  aprEchoToleranceRelPct: number;
   verifyMakerSig: 'warn' | 'enforce';
   /** Gate G5. */
   maxClockSkewMs: number;

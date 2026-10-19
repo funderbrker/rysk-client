@@ -21,7 +21,8 @@ export type CheckedConfirmBody = ConfirmBody & { readonly [checkedBrand]: true }
 
 /**
  * The config's `safety` block (Appendix B) normalized, plus the traded side's limits and the WHYPE asset's
- * trade sizes and strike precision. Fractions are fractions (`minOtmPct: 0.01` is 1 %); `aprEchoTolerancePp` is in percentage points.
+ * trade sizes and strike precision. Fractions are fractions (`minOtmPct: 0.01` is 1 %); `aprEchoTolerancePp` is in
+ * percentage points and `aprEchoToleranceRelPct` a fraction of the quoted `apy`.
  */
 export type ExecutionConfig = {
   maxGasFee6: bigint;
@@ -31,6 +32,7 @@ export type ExecutionConfig = {
   maxQuoteTtlSec: number;
   maxPremiumFractionOfCollateral: number;
   aprEchoTolerancePp: number;
+  aprEchoToleranceRelPct: number;
   verifyMakerSig: 'warn' | 'enforce';
   maxDeploymentsPer24h: number;
   maxNotionalPer24h6: bigint;
@@ -251,7 +253,13 @@ function c6(ctx: CheckContext): Outcome {
   return PASS;
 }
 
-/** C7: a positive, plausible price whose APR (gas 0) agrees with the quote's `apy`. */
+/**
+ * C7: a positive, plausible price whose APR (gas 0) agrees with the quote's `apy`: within `aprEchoTolerancePp` for
+ * a put, whose collateral is its strike and which both sides price alike (the validation run's puts agreed
+ * exactly); for a call within the larger of that and `aprEchoToleranceRelPct` of the `apy`, since a call's APR is
+ * priced at fresh spot while the maker priced its `apy` at the spot of moments earlier, so a 1 pp disagreement at a
+ * 100 % APR is a 1 % move, not a mismatch. A non-finite `apy` fails.
+ */
 function c7(ctx: CheckContext): Outcome {
   const quote = ctx.freshQuote;
   const { config } = ctx;
@@ -267,20 +275,37 @@ function c7(ctx: CheckContext): Outcome {
   }
   const ours = aprFraction(t.premium6, t.collateral6, ctx.serverNowSec, quote.expiry);
   const quoted = aprFractionFromRyskApy(quote.apy);
-  if (!(Math.abs(ours - quoted) <= config.aprEchoTolerancePp / 100)) {
-    return fail(
-      `${APR_ECHO_DETAIL}${ours} vs quoted ${quoted}: more than ${config.aprEchoTolerancePp} pp apart`,
-    );
+  if (!Number.isFinite(quoted)) return fail(`quoted apy ${String(quote.apy)} is not a finite number`);
+  const relative = isPut ? 0 : config.aprEchoToleranceRelPct * quoted;
+  if (!(Math.abs(ours - quoted) <= Math.max(config.aprEchoTolerancePp / 100, relative))) {
+    // The fraction is whole basis points (config), so this is exact.
+    const relPct = Math.round(config.aprEchoToleranceRelPct * 10_000) / 100;
+    const limits = isPut
+      ? `${config.aprEchoTolerancePp} pp`
+      : `${config.aprEchoTolerancePp} pp and ${relPct} % of the quote`;
+    return fail(`${APR_ECHO_DETAIL}${ours} vs quoted ${quoted}: more than ${limits} apart`);
   }
   return PASS;
 }
 
 /**
  * Whether a failed check (an `aborted('guard')` result's `checkId` and `message`) is C7's APR echo disagreement
- * rather than one of C7's price checks; the daemon halts live on the second (spec §10).
+ * rather than one of C7's price checks; the daemon halts live on the second within an hour (spec §10).
  */
 export function isAprEchoDisagreement(failure: { checkId?: string; message: string }): boolean {
   return failure.checkId === 'C7' && failure.message.startsWith(APR_ECHO_DETAIL);
+}
+
+/** Guard failures the daemon does not back the instrument off for (spec §8.7). */
+const STATE_CHECK_IDS: ReadonlySet<string> = new Set(['C2', 'C10']);
+
+/**
+ * Whether a guard failure on `checkId` (`undefined` for one outside the checklist) backs the instrument off
+ * (spec §8.7): every check's does but C2's, the fresh state and tranche, and C10's, the strike against fresh spot,
+ * which the next tick's plan recomputes rather than repeats.
+ */
+export function failureBacksOffInstrument(checkId: string | undefined): boolean {
+  return checkId === undefined || !STATE_CHECK_IDS.has(checkId);
 }
 
 /** C8: the net premium after the GAS step's fee clears the APR floor (normal) or the fallback floor. */

@@ -209,7 +209,9 @@ const configFile = z.strictObject({
     minQuoteTtlSec: count,
     maxQuoteTtlSec: count,
     maxPremiumFractionOfCollateral: unitInterval,
-    aprEchoTolerancePp: nonNegative,
+    /** Positive: a put is held to this alone, and 0 would demand float equality (every put would fail C7). */
+    aprEchoTolerancePp: z.number().positive(),
+    aprEchoToleranceRelPct: bpsPct,
     verifyMakerSig: z.enum(['warn', 'enforce']),
     maxClockSkewMs: count,
     startupQuietSec: count,
@@ -322,12 +324,17 @@ function checkSide(side: 'put' | 'call', config: SideFile): void {
   }
 }
 
-/** Spec §8.4: a zero anchor would disable the basis rule, so calls need a real one (to run; see `ConfigFlags`). */
+/**
+ * Spec §8.4: a zero anchor would disable the basis rule, so calls need a real one to run (see `ConfigFlags`). The
+ * example ships a zero anchor, so `run` refuses it, field by field, until the operator has filled in both the
+ * time and the basis price; a half-filled anchor is caught the same way.
+ */
 function checkAnchor(file: ConfigFile): void {
   if (!file.call.enabled) return;
+  const { anchor } = file.basis;
   const hint = 'must be positive while call.enabled (see `rysk basis suggest-anchor`)';
-  if (file.basis.anchor.ts <= 0) throw new ConfigError('basis.anchor.ts', hint);
-  if (file.basis.anchor.basisUsd <= 0n) throw new ConfigError('basis.anchor.basisUsd', hint);
+  if (anchor.ts <= 0) throw new ConfigError('basis.anchor.ts', hint);
+  if (anchor.basisUsd <= 0n) throw new ConfigError('basis.anchor.basisUsd', hint);
 }
 
 /** Check C6 accepts a quote TTL in `[minQuoteTtlSec, maxQuoteTtlSec]`; an empty range rejects every quote. */
@@ -357,7 +364,11 @@ function checkRfqRates(file: ConfigFile): void {
   }
 }
 
-/** Spec §9.1: live needs `--live` and `mode: "live"`; `--live` alone is an error; the file alone runs dry. */
+/**
+ * Spec §9.1: live needs `--live` and `mode: "live"`; `--live` alone is an error; the file alone runs dry. A live
+ * run also needs the trading wallet and `verifyMakerSig: "enforce"`: under `"warn"` a quote whose maker signature
+ * does not recover could be signed and sent (the chain would refuse it, but the confirm counts as an error).
+ */
 function resolveMode(file: ConfigFile, live: boolean, warnings: string[]): AppConfig['mode'] {
   if (live && file.mode === 'dry-run') {
     throw new ConfigError('mode', `--live needs mode "live" in the config, which says "dry-run"`);
@@ -369,6 +380,12 @@ function resolveMode(file: ConfigFile, live: boolean, warnings: string[]): AppCo
   }
   if (isAddressEqual(file.account.address, zeroAddress)) {
     throw new ConfigError('account.address', 'a live run needs the trading wallet, not the zero address');
+  }
+  if (file.safety.verifyMakerSig !== 'enforce') {
+    throw new ConfigError(
+      'safety.verifyMakerSig',
+      `must be "enforce" for a live run, not "${file.safety.verifyMakerSig}"`,
+    );
   }
   return 'live';
 }
@@ -413,6 +430,7 @@ function wheelConfig(file: ConfigFile, mode: AppConfig['mode']): WheelConfig {
       maxQuoteTtlSec: safety.maxQuoteTtlSec,
       maxPremiumFractionOfCollateral: safety.maxPremiumFractionOfCollateral,
       aprEchoTolerancePp: safety.aprEchoTolerancePp,
+      aprEchoToleranceRelPct: safety.aprEchoToleranceRelPct,
       verifyMakerSig: safety.verifyMakerSig,
       maxClockSkewMs: safety.maxClockSkewMs,
       startupQuietSec: safety.startupQuietSec,

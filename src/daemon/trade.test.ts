@@ -90,6 +90,7 @@ describe('executionConfig', () => {
       maxQuoteTtlSec: 600,
       maxPremiumFractionOfCollateral: 0.15,
       aprEchoTolerancePp: 1,
+      aprEchoToleranceRelPct: 0.05,
       verifyMakerSig: 'warn',
       maxDeploymentsPer24h: 4,
       maxNotionalPer24h6: 20000_000000n,

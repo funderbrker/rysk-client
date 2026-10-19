@@ -41,6 +41,7 @@ export function executionConfig(side: Side, c: WheelConfig, asset: Asset): Execu
     maxQuoteTtlSec: safety.maxQuoteTtlSec,
     maxPremiumFractionOfCollateral: safety.maxPremiumFractionOfCollateral,
     aprEchoTolerancePp: safety.aprEchoTolerancePp,
+    aprEchoToleranceRelPct: safety.aprEchoToleranceRelPct,
     verifyMakerSig: safety.verifyMakerSig,
     maxDeploymentsPer24h: safety.maxDeploymentsPer24h,
     maxNotionalPer24h6: safety.maxNotionalPer24h6,

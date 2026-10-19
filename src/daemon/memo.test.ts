@@ -173,11 +173,12 @@ describe('Memo: snapshotMemo', () => {
     const memo = new Memo(1234);
     expect(memo.startedAtMs).toBe(1234);
     expect(memo.haltedLive).toBe(false);
-    expect(memo.aprEchoDisagreements).toBe(0);
+    expect(memo.aprEchoDisagreementsSec).toEqual([]);
     expect(memo.usedQuoteNonces.size).toBe(0);
     expect(memo.lastNonceMs).toEqual({ value: 0 });
     expect(memo.pendingVisibility).toEqual([]);
     expect(memo.unknownWaits).toEqual([]);
+    expect(memo.rejectedWatches).toEqual([]);
     expect(memo.replanDueSec).toEqual({});
   });
 });

@@ -105,7 +105,8 @@ export type TradeDeps = {
 /**
  * Every result after the confirm was sent carries `bookkeepingErrors`: bookkeeping (records, cooldown callbacks,
  * the STOP file) never changes such an outcome, so each failure is listed as `<operation>: <message>` (`[]` when
- * clean). `aborted('confirm-rejected')` is the one abort after the send and carries the list too.
+ * clean). `aborted('confirm-rejected')` is the one abort after the send: it carries the list too, and
+ * `confirmSentAtSec` for the daemon's watch on the fill the reply denied.
  */
 export type TradeResult =
   | {
@@ -144,12 +145,19 @@ export type TradeResult =
         | 'guard'
         | 'sign'
         | 'shutdown'
-        | 'confirm-rejected'
         | 'dry-run';
       message: string;
       checkId?: string;
       approveTxHash?: Hex;
       echoOk?: boolean;
       wouldApprove?: bigint;
-      bookkeepingErrors?: string[];
+    }
+  | {
+      status: 'aborted';
+      stage: 'confirm-rejected';
+      message: string;
+      /** Server seconds when the confirm was sent. */
+      confirmSentAtSec: number;
+      approveTxHash?: Hex;
+      bookkeepingErrors: string[];
     };

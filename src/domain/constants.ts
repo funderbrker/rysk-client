@@ -12,12 +12,15 @@ export const ADDRESSES: {
   marginPool: Address;
   mmarket: Address;
   vaultStore: Address;
+  /** The Gamma controller, which mints the short in a fill (`ShortOtokenMinted`; docs/rysk-protocol.md §12.1). */
+  controller: Address;
   multicall3: Address;
 } = {
   rysk: getAddress('0x8C8bcb6D2c0E31c5789253EcC8431cA6209B4E35'),
   marginPool: getAddress('0x24a44f1dc25540c62c1196FfC297dFC951C91aB4'),
   mmarket: getAddress('0x691a5fc3a81a144e36c6C4fBCa1fC82843c80d0d'),
   vaultStore: getAddress('0x84d84e481b49b8bc5a55f17aaf8181c21a29b212'),
+  controller: getAddress('0x577b846a95711015769452f7f29d8054cf087964'),
   multicall3: getAddress('0xcA11bde05977b3631167028862bE2a173976CA11'),
 };
 

@@ -1,13 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { getAddress } from 'viem';
 import { describe, expect, it } from 'vitest';
+import { aprFraction, collateral6For } from '../domain/apr.ts';
 import { TOKENS, TRADED_PRODUCTS } from '../domain/constants.ts';
 import type { ConfirmBody, Quote, QuoteRequest, Side } from '../domain/types.ts';
+import { premium6 } from '../domain/units.ts';
 import { recoverQuoteSigner } from '../rysk/eip712.ts';
 import { buildConfirmBody } from './body.ts';
 import {
   type CheckContext,
   type ExecutionConfig,
+  failureBacksOffInstrument,
   isAprEchoDisagreement,
   runPreSignChecks,
 } from './checks.ts';
@@ -44,6 +47,7 @@ function config(): ExecutionConfig {
     maxQuoteTtlSec: 600,
     maxPremiumFractionOfCollateral: 0.15,
     aprEchoTolerancePp: 1,
+    aprEchoToleranceRelPct: 0.05,
     verifyMakerSig: 'warn',
     maxDeploymentsPer24h: 4,
     maxNotionalPer24h6: 20_000_000_000n,
@@ -237,7 +241,7 @@ describe('runPreSignChecks', () => {
       'C7',
       (ctx) => (ctx.freshQuote = { ...ctx.freshQuote, price: '20000000000000000000' }),
     ],
-    ['a quoted apy 2 pp off ours', 'C7', (ctx) => (ctx.freshQuote = { ...ctx.freshQuote, apy: 77.4 })],
+    ['a quoted apy 10 pp off ours', 'C7', (ctx) => (ctx.freshQuote = { ...ctx.freshQuote, apy: 85.4 })],
     ['an APR floor of 90 %', 'C8', (ctx) => (ctx.config.minApr = 0.9)],
     ['an echoed price of 1', 'C9', (ctx) => (ctx.echoed = { ...ctx.echoed, price: '1' })],
     ['an echoed unknown key', 'C9', (ctx) => (ctx.echoed = { ...ctx.echoed, foo: 1 })],
@@ -293,9 +297,15 @@ describe('runPreSignChecks', () => {
     expectFailure(ctx, id);
   });
 
+  it('backs the instrument off for every guard failure but C2 and C10', () => {
+    const backsOff = IDS.filter((id) => failureBacksOffInstrument(id));
+    expect(backsOff).toEqual(IDS.filter((id) => id !== 'C2' && id !== 'C10'));
+    expect(failureBacksOffInstrument(undefined)).toBe(true);
+  });
+
   it("tells C7's APR echo disagreement apart from its price checks", () => {
     const echo = context('put');
-    echo.freshQuote = { ...echo.freshQuote, apy: 77.4 };
+    echo.freshQuote = { ...echo.freshQuote, apy: 85.4 };
     const echoDetail = expectFailure(echo, 'C7').detail ?? '';
     expect(isAprEchoDisagreement({ checkId: 'C7', message: echoDetail })).toBe(true);
     expect(isAprEchoDisagreement({ checkId: 'C8', message: echoDetail })).toBe(false);
@@ -348,6 +358,54 @@ describe('runPreSignChecks', () => {
     const below = context('put');
     below.fresh.capHeadroomE18 = 24n * E18;
     expect(expectFailure(below, 'C14').detail).toContain('cap headroom');
+  });
+
+  describe('C7 APR echo tolerance', () => {
+    /** Our APR (gas 0) of the fresh quote, as C7 computes it. */
+    function oursOf(ctx: CheckContext): number {
+      const { quantity, price, strike, expiry } = ctx.freshQuote;
+      const qtyE18 = BigInt(quantity);
+      const collateral6 = collateral6For(ctx.intent.side, qtyE18, BigInt(strike), ctx.fresh.spotE8);
+      return aprFraction(premium6(qtyE18, BigInt(price)), collateral6, ctx.serverNowSec, expiry);
+    }
+
+    /** The context with the quote's `apy` set `ppApart` percentage points above ours. */
+    function apart(side: Side, ppApart: number, tolerance: { pp: number; rel: number }): CheckContext {
+      const ctx = context(side);
+      ctx.freshQuote = { ...ctx.freshQuote, apy: (oursOf(ctx) + ppApart / 100) * 100 };
+      ctx.config.aprEchoTolerancePp = tolerance.pp;
+      ctx.config.aprEchoToleranceRelPct = tolerance.rel;
+      return ctx;
+    }
+
+    it('passes a call quote 1.5 pp apart at a high APR by the relative tolerance, which the absolute refuses', () => {
+      const ctx = apart('call', 1.5, { pp: 1, rel: 0.05 });
+      expect(oursOf(ctx)).toBeGreaterThan(0.4); // 5 % of it is more than 1.5 pp
+      expect(runPreSignChecks(ctx).ok).toBe(true);
+      expectFailure(apart('call', 1.5, { pp: 1, rel: 0 }), 'C7');
+    });
+
+    it('holds a put, whose collateral both sides price alike, to the absolute tolerance only', () => {
+      expect(runPreSignChecks(apart('put', 0.5, { pp: 1, rel: 0.05 })).ok).toBe(true);
+      const failed = expectFailure(apart('put', 1.5, { pp: 1, rel: 0.05 }), 'C7');
+      expect(failed.detail).toMatch(/^our APR .* more than 1 pp apart$/);
+    });
+
+    it('fails a call quote far off ours under both tolerances, naming them', () => {
+      const failed = expectFailure(apart('call', 10, { pp: 1, rel: 0.05 }), 'C7');
+      expect(failed.detail).toMatch(/^our APR .* more than 1 pp and 5 % of the quote apart$/);
+      expect(isAprEchoDisagreement({ checkId: 'C7', message: failed.detail ?? '' })).toBe(true);
+    });
+
+    it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+      'fails a call quote whose apy is %s rather than passing an infinite tolerance',
+      (apy) => {
+        const ctx = context('call');
+        ctx.freshQuote = { ...ctx.freshQuote, apy };
+        const failed = expectFailure(ctx, 'C7');
+        expect(isAprEchoDisagreement({ checkId: 'C7', message: failed.detail ?? '' })).toBe(false);
+      },
+    );
   });
 
   describe('candidate mode', () => {
