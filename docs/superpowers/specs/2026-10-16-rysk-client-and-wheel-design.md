@@ -52,7 +52,7 @@ Known limitations of v1, found while implementing and validating it:
   quote such strikes.
   A strike refused while unlisted was quoted once the inventory listed it again; a few strikes were still
   quoted shortly after they left the inventory (presumably the server's refresh lag); a wallet with volume had
-  an unlisted strike quoted. Because a full sweep takes about 25 minutes at 6 RFQ/min while the listed strikes
+  an unlisted strike quoted. Because a full sweep took about 25 minutes at 6 RFQ/min (the validation run; now about a minute over two sockets) while the listed strikes
   change about once a minute, 37 of the validation run's 100 RFQs (all sampler legs on strikes de-listed by then)
   were refused this way and recorded as `error`.
 - **Startup settlement hold.** A fresh process holds both sides on G3 for `settlementGraceSec` (900 s) after its
@@ -62,7 +62,7 @@ Known limitations of v1, found while implementing and validating it:
   the daemon is often pid 1 on every start, so a crash leaves a lock that looks held. systemd is the supported
   runner. Two instances started at the same moment against a stale lock can both take it.
 - **The execution requote is outside the RFQ buckets** (waiting for a token would spend the quote's TTL). The
-  config keeps `strategyRfqPerMin + samplerRfqPerMin ≤ 18` under the 20/min hard cap; there is at most one
+  config keeps `strategyRfqPerMin + samplerRfqPerMin ≤ 58` under the 60/min hard cap; there is at most one
   requote per execution.
 - **No approve fee bump.** The one replacement at +30 % after 5 min (§5.3) is not implemented: an unmined approve
   aborts the trade (`approve`, `stuck`) and G8's `tx-pending` holds while it is pending.
@@ -744,9 +744,11 @@ and C10, the strike against spot), reset when spot moves > 2 % or its indicative
 backs off under the same key (its strike is known), and the post-plan filter drops it like a listed one; it has no
 indicative APR, so only a spot move resets it. A due side whose floor is
 unmet re-plans every `replanSec` (300); meanwhile its decision record repeats the hold with `replanDueSec`.
-Token buckets: strategy 12 RFQ/min, sampler 6 RFQ/min, each combined with a shared hard cap of 20/min
-(`combinedBucket`: a token is taken only when every bucket has one). The execution's requote takes no token;
-the config therefore requires `strategyRfqPerMin + samplerRfqPerMin ≤ 18`.
+Token buckets: strategy 12 RFQ/min, sampler 40 RFQ/min, each combined with a shared hard cap of 60/min, one a
+second (`combinedBucket`: a token is taken only when every bucket has one). Rysk documents no limit and the app's
+public zero-address traffic alone runs near 8 RFQ/s (protocol doc §13.4), so the cap stays an order of magnitude
+under what the backend absorbs; it was 20/min until 2026-10-19. The execution's requote takes no token; the config
+therefore requires `strategyRfqPerMin + samplerRfqPerMin ≤ 58`.
 
 ### 8.8 Dry-run cadence (see §8.9 for config)
 
@@ -809,20 +811,23 @@ still ends. Dry-run never loads the keystore.
 
 ### 9.2 Research sampler
 
-A separate loop per stream with its **own** `JsonRpcSocket` (serialization is per connection), with its own
-token bucket combined with the hard cap it shares with the strategy; fixed-delay scheduling (the next run
-starts `*EveryMin` after the previous one ends; `*EveryMin: 0` turns a stream off); `requestTimeoutMs` 6000; paused while any `sellOption` runs (`memo.inFlight`,
-both modes); never confirms. RFQ groups (one listing's legs, the taker pair) go to the socket back to back, one
-group at a time across the streams; the RFQ streams and the inventory stream wait for the first listings.
-Defaults:
+A loop per stream, sharing `sampler.parallel` (default 2) **lanes**, each its own `JsonRpcSocket` and `RyskTaker`
+(a socket carries one RFQ at a time, since a reply's `id` is only the method name, §6.7): RFQ groups (one
+listing's legs, the taker pair) queue FIFO across the streams and each goes to the first free lane, where it is sent
+back to back, one group at a time per lane. One token bucket for the whole sampler, combined with the hard cap it
+shares with the strategy, bounds the total across lanes; a lane manages about 22 RFQ/min (a 2.4 s auction plus the
+taker's 250 ms pacing), so two lanes reach the 40/min budget and more only shorten the bursts. Fixed-rate scheduling: the next run of a stream starts `*EveryMin` after the previous
+one **started**, or at once after a run that took longer, and two runs of one stream never overlap (`*EveryMin: 0`
+turns a stream off); `requestTimeoutMs` 6000; paused while any `sellOption` runs (`memo.inFlight`, both modes);
+never confirms. The RFQ streams and the inventory stream wait for the first listings. Defaults:
 
-- **Hourly sweep**: every listed HYPE combination, both sides, 25 contracts, `taker = zero`, pair legs
-  back-to-back in random order: puts USDC; calls WHYPE. The sweep is built
-  from the listings at its start; at 6 RFQ/min its ~48 legs take about 8 minutes while the listed strikes change
-  about once a minute, so each leg is checked against `deps.listings()` when its turn comes and skipped (no RFQ, no
-  token) when its instrument is no longer listed (the server would refuse it as a custom strike for the zero taker,
-  §1.2). A finished sweep writes one `{ purpose: 'sweep-summary', run, legs, sent, skippedUnlisted }` record to
-  `quotes`.
+- **Sweep every 5 minutes**: every listed HYPE combination, both sides, 25 contracts, `taker = zero`, in random
+  order: puts USDC; calls WHYPE. The sweep is built from the listings at its start and dealt to every lane at once;
+  over 2 lanes its ~48 legs take about 65 s (one lane at 6/min took 8 minutes) while the listed
+  strikes change about once a minute, so each leg is checked against `deps.listings()` when its turn comes and
+  skipped (no RFQ, no token) when its instrument is no longer listed (the server would refuse it as a custom strike
+  for the zero taker, §1.2). A finished sweep writes one `{ purpose: 'sweep-summary', run, legs, sent,
+  skippedUnlisted }` record to `quotes`.
 - **Pinned series**: up to 4 instruments (default the ~0.10 and ~0.25 delta strikes of the nearest expiry,
   both sides), every 5 min for their lifetime (as custom strikes once de-listed, which the server refuses for
   the zero taker while the strike is not listed, §1.2), re-picked once they expire. Pinned and taker-pair RFQs use the traded products only (USDC puts, WHYPE calls).
@@ -1241,7 +1246,7 @@ applyTradeResult(memo: Memo, side: Side, result: TradeResult, nowSec: number, c:
   ctx: { terms: TradeTerms; counterBefore: bigint; writeStop(reason: string): void; log: Log }): void;
 runSampler(deps: SamplerDeps, cfg: SamplerConfig): Promise<void>;
 export type RfqBucket = Pick<TokenBucket, 'take' | 'waitMs'>;
-combinedBucket(...buckets: RfqBucket[]): RfqBucket;    // strategy 12/min or sampler 6/min, each with the shared 20/min
+combinedBucket(...buckets: RfqBucket[]): RfqBucket;    // strategy 12/min or sampler 40/min, each with the shared 60/min
 export type Lock = { readonly held: boolean; release(): void };
 acquireLock(dataDir: string): Lock;                    // throws LockHeldError
 // trade.ts (pure)
@@ -1280,7 +1285,7 @@ wireDaemon(config: AppConfig, opts: WireOptions): Wired;
   "basis": { "anchor": { "ts": 0, "qtyWhype": "0", "basisUsd": "0" }, "externalFlows": [],
              "residualPolicy": "absorb", "residualToleranceWhype": "0.000001" },
   "quoting": { "quotesPerSide": 3, "rfqTimeoutMs": 15000, "replanSec": 300, "prefilterRatio": 0.5,
-               "strategyRfqPerMin": 12, "samplerRfqPerMin": 6 },
+               "strategyRfqPerMin": 12, "samplerRfqPerMin": 40 },
   "safety": { "maxGasFeeUsd": "0.5", "maxGasFeeBps": 200, "minNetPremiumUsd": "1", "minQuoteTtlSec": 15, "maxQuoteTtlSec": 600,
               "maxPremiumFractionOfCollateral": 0.15, "aprEchoTolerancePp": 1.0, "aprEchoToleranceRelPct": 5,
               "verifyMakerSig": "enforce",
@@ -1288,7 +1293,7 @@ wireDaemon(config: AppConfig, opts: WireOptions): Wired;
               "maxDeploymentsPer24h": 4, "maxNotionalPer24hUsd": "20000", "minNativeHype": "0.05",
               "maxFeePerGasGwei": 5, "confirmTimeoutMs": 60000, "unknownMaxWaitSec": 1800,
               "maxHypeExposurePct": null, "pauseOnFrontendChange": true },
-  "sampler": { "enabled": true, "sweepEveryMin": 60, "pinned": 4, "pinnedEveryMin": 5, "takerPairEveryMin": 60,
+  "sampler": { "enabled": true, "parallel": 2, "sweepEveryMin": 5, "pinned": 4, "pinnedEveryMin": 5, "takerPairEveryMin": 60,
                "inventoryEveryMin": 5, "publicFillsEveryMin": 60, "requestTimeoutMs": 6000,
                "putStables": ["usdc"], "callCollaterals": ["whype"] }
 }

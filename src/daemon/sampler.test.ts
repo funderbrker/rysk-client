@@ -39,6 +39,7 @@ const { USDC, USDT0, WHYPE, KHYPE, LHYPE, WSTHYPE } = TOKENS;
 const SYMBOLS = new Map<Address, string>(Object.values(TOKENS).map((t) => [t.address, t.symbol]));
 const OFF: SamplerConfig = {
   enabled: true,
+  parallel: 1,
   sweepEveryMin: 0,
   pinned: 4,
   pinnedEveryMin: 0,
@@ -98,7 +99,7 @@ function harness(patch: Partial<SamplerDeps> = {}) {
     },
   );
   const deps: SamplerDeps = {
-    taker: { requestQuote },
+    takers: [{ requestQuote }],
     rest: {
       caps: vi.fn(async () => capsJson),
       publicHistory: vi.fn(async (_fromSec: number, _toSec: number): Promise<unknown> => []),
@@ -509,7 +510,7 @@ describe('runSampler', () => {
     expect(h.requestQuote).not.toHaveBeenCalled();
   });
 
-  it('sends one RFQ at a time across the streams and never splits a group', async () => {
+  it('with one lane, sends one RFQ at a time across the streams and never splits a group', async () => {
     let inFlight = 0;
     let maxInFlight = 0;
     const h = harness();
@@ -774,5 +775,178 @@ describe('runSampler', () => {
       expect(h.deps.rest.publicHistory).not.toHaveBeenCalled();
       expect(h.deps.recorder.append).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe('runSampler: lanes and scheduling', () => {
+  /** USDC puts and WHYPE calls only: one leg per listing. */
+  const TRADED: SamplerConfig = { ...OFF, putStables: [USDC.address], callCollaterals: [WHYPE.address] };
+  const LEGS = buildSweep(fixtureListings(), TRADED, QTY_E18, () => 0.5).length;
+
+  type InFlight = { now: number; max: number };
+  const counting = (): InFlight => ({ now: 0, max: 0 });
+
+  /** A taker whose RFQs take `auctionMs`, counting how many it has in flight at once, and how many all takers have. */
+  function laneTaker(auctionMs: number, lane: InFlight, all: InFlight = counting()) {
+    const requestQuote = vi.fn(async (req: QuoteRequest): Promise<QuoteResult> => {
+      const atMs = Date.now();
+      for (const c of [lane, all]) {
+        c.now += 1;
+        c.max = Math.max(c.max, c.now);
+      }
+      if (auctionMs > 0) await sleep(auctionMs);
+      for (const c of [lane, all]) c.now -= 1;
+      return { ok: true, quote: quoteFor(req, atMs), requestedAtMs: atMs, respondedAtMs: Date.now() };
+    });
+    return { requestQuote };
+  }
+
+  it('deals the sweep to the free takers, one RFQ in flight per socket', async () => {
+    const perLane = [0, 1, 2].map(counting);
+    const all = counting();
+    const takers = perLane.map((lane) => laneTaker(2_000, lane, all));
+    const clock = { nowMs: () => Date.now() };
+    const h = harness({
+      takers: [takers[0] as (typeof takers)[0], ...takers.slice(1)],
+      bucket: new TokenBucket(60, clock),
+    });
+    await runFor(h, { ...TRADED, sweepEveryMin: 60 }, 60_000);
+
+    expect(LEGS).toBeGreaterThanOrEqual(45);
+    const calls = takers.map((t) => t.requestQuote.mock.calls.length);
+    expect(calls.reduce((a, b) => a + b)).toBe(LEGS);
+    expect(Math.max(...calls) - Math.min(...calls)).toBeLessThanOrEqual(1);
+    expect(perLane.map((lane) => lane.max)).toEqual([1, 1, 1]);
+    expect(all.max).toBe(3);
+    const quotes = rfqs(h);
+    expect(quotes).toHaveLength(LEGS);
+    expect(new Set(quotes.map((q) => q.instrument?.key)).size).toBe(LEGS);
+    // Three auctions of 2 s at a time: the whole sweep inside 60 s, where one lane would need LEGS × 2 s.
+    const last = Math.max(...quotes.map((q) => q.requestedAtMs as number));
+    expect(last - NOW_SEC * 1000).toBeLessThanOrEqual(Math.ceil(LEGS / 3) * 2_000);
+    expect(h.of('quotes').at(-1)).toMatchObject({ purpose: 'sweep-summary', legs: LEGS, sent: LEGS });
+  });
+
+  it('keeps the bucket rate across the lanes: three sockets send no more than one', async () => {
+    const takers = [0, 1, 2].map(() => laneTaker(0, counting()));
+    const h = harness({ takers: [takers[0] as (typeof takers)[0], ...takers.slice(1)] });
+    const done = runSampler(h.deps, { ...TRADED, sweepEveryMin: 60 });
+    await vi.advanceTimersByTimeAsync(2 * MINUTE_MS);
+    h.controller.abort();
+    await done;
+    // 6 tokens at once, then one every 10 s: 18 in two minutes, whatever the number of sockets.
+    expect(takers.reduce((n, t) => n + t.requestQuote.mock.calls.length, 0)).toBe(6 + 12);
+  });
+
+  it('keeps a multi-leg group and the taker pair on one socket when there are several', async () => {
+    const takers = [0, 1, 2].map(() => laneTaker(100, counting()));
+    const h = harness({
+      takers: [takers[0] as (typeof takers)[0], ...takers.slice(1)],
+      bucket: new TokenBucket(60, { nowMs: () => Date.now() }),
+    });
+    // OFF's legs: two stables a put, four collaterals a call; plus the taker pair's two legs.
+    await runFor(h, { ...OFF, sweepEveryMin: 60, takerPairEveryMin: 60 }, 3 * MINUTE_MS);
+
+    const laneOf = new Map<string, Set<number>>();
+    takers.forEach((taker, lane) => {
+      for (const [request] of taker.requestQuote.mock.calls) {
+        const group = `${request.taker}|${request.isPut}|${request.strike}|${request.expiry}`;
+        (laneOf.get(group) ?? laneOf.set(group, new Set()).get(group))?.add(lane);
+      }
+    });
+    expect(laneOf.size).toBeGreaterThan(40);
+    expect([...laneOf.values()].every((lanes) => lanes.size === 1)).toBe(true);
+    const pairLane = takers.find((t) => t.requestQuote.mock.calls.some(([r]) => r.taker === SELF));
+    if (pairLane === undefined) throw new Error('no taker pair sent');
+    const pairLegs = pairLane.requestQuote.mock.calls.map(([r]) => r.taker);
+    const selfAt = pairLegs.indexOf(SELF);
+    expect(pairLegs[selfAt + 1]).toBe(zeroAddress);
+  });
+
+  it('stops every lane promptly on abort and records no RFQ the shutdown cut off', async () => {
+    const takers = [0, 1, 2].map(() => laneTaker(2_000, counting()));
+    const h = harness({
+      takers: [takers[0] as (typeof takers)[0], ...takers.slice(1)],
+      bucket: new TokenBucket(60, { nowMs: () => Date.now() }),
+    });
+    // Closing the sockets at shutdown answers an in-flight RFQ `socket-closed`.
+    for (const taker of takers) {
+      taker.requestQuote.mockImplementation(async (req) => {
+        const atMs = Date.now();
+        await sleep(2_000);
+        if (h.deps.signal.aborted) {
+          return { ok: false, error: 'socket-closed', message: 'closed', requestedAtMs: atMs };
+        }
+        return { ok: true, quote: quoteFor(req, atMs), requestedAtMs: atMs, respondedAtMs: Date.now() };
+      });
+    }
+    const done = runSampler(h.deps, { ...TRADED, sweepEveryMin: 60 });
+    await vi.advanceTimersByTimeAsync(9_000);
+    h.controller.abort();
+    await vi.advanceTimersByTimeAsync(2_500); // the three open auctions end after the abort
+    await done;
+    const sent = takers.reduce((n, t) => n + t.requestQuote.mock.calls.length, 0);
+    expect(sent).toBe(15); // 3 lanes × 5 auctions of 2 s in 9 s, the last three still open at the abort
+    await vi.advanceTimersByTimeAsync(MINUTE_MS);
+    expect(takers.reduce((n, t) => n + t.requestQuote.mock.calls.length, 0)).toBe(sent);
+    const quotes = rfqs(h);
+    expect(quotes).toHaveLength(12);
+    expect(quotes.every((q) => q.outcome === 'quote')).toBe(true);
+    expect(h.of('quotes').some((q) => q.purpose === 'sweep-summary')).toBe(false);
+  });
+
+  it('writes a full inventory record every interval even when the caps read is slow', async () => {
+    const h = harness();
+    let call = 0;
+    h.deps.rest.caps = vi.fn(async () => {
+      await sleep(100 + (call++ % 4) * 100); // 100–400 ms, varying
+      return CAPS_JSON;
+    });
+    const done = runSampler(h.deps, { ...OFF, inventoryEveryMin: 5 });
+    await vi.advanceTimersByTimeAsync(31 * MINUTE_MS);
+    h.controller.abort();
+    await vi.advanceTimersByTimeAsync(1_000); // a caps read open at the abort finishes
+    await done;
+    const fulls = h.of('inventory').filter((r) => r.trigger === 'first' || r.trigger === 'interval');
+    // Checks run every minute on a fixed grid: minutes 0, 5, 10, …, 30 give seven full records.
+    expect(fulls).toHaveLength(7);
+  });
+
+  it('starts each run a fixed period after the previous one started, not after it ended', async () => {
+    const h = harness();
+    // At 6 a minute the sweep takes (LEGS − 6) × 10 s, under the 10-minute period.
+    const sweepMs = (LEGS - 6) * 10_000;
+    expect(sweepMs).toBeLessThan(10 * MINUTE_MS);
+    await runFor(h, { ...TRADED, sweepEveryMin: 10 }, 11 * MINUTE_MS);
+
+    const starts = [1, 2].map((run) =>
+      Math.min(
+        ...rfqs(h)
+          .filter((q) => q.run === run)
+          .map((q) => q.requestedAtMs as number),
+      ),
+    );
+    expect(starts).toEqual([NOW_SEC * 1000, NOW_SEC * 1000 + 10 * MINUTE_MS]);
+    // Run 1 finished (its summary is written); run 2 is under way when the window ends.
+    expect(
+      h
+        .of('quotes')
+        .filter((q) => q.purpose === 'sweep-summary')
+        .map((q) => q.run),
+    ).toEqual([1]);
+  });
+
+  it('follows a run that outlasts its period at once, and never overlaps two runs of one stream', async () => {
+    const h = harness();
+    const sweepMs = (LEGS - 6) * 10_000;
+    expect(sweepMs).toBeGreaterThan(5 * MINUTE_MS);
+    await runFor(h, { ...TRADED, sweepEveryMin: 5 }, sweepMs + MINUTE_MS);
+
+    const quotes = rfqs(h);
+    const firstOfRun2 = Math.min(...quotes.filter((q) => q.run === 2).map((q) => q.requestedAtMs as number));
+    const lastOfRun1 = Math.max(...quotes.filter((q) => q.run === 1).map((q) => q.requestedAtMs as number));
+    expect(lastOfRun1).toBe(NOW_SEC * 1000 + sweepMs);
+    // Run 2 starts as run 1 ends and waits only for the next token, 10 s later.
+    expect(firstOfRun2).toBe(NOW_SEC * 1000 + sweepMs + 10_000);
   });
 });

@@ -70,12 +70,12 @@ const GIT_TIMEOUT_MS = 2_000;
 
 /**
  * Builds the daemon from its config (spec §9): one Rysk REST client feeding the memo's server skew, a JSON-RPC socket
- * and taker each for the strategy and the sampler, batched HyperEVM clients (a wallet client in live only), the
+ * and taker for the strategy and `sampler.parallel` of them for the sampler, batched HyperEVM clients (a wallet client in live only), the
  * recorder, the memo and the frontend version tripwire. Nothing connects or starts here: sockets open on their first
  * call and the tripwire on `version.start()`.
  *
  * - `loopDeps.snapshot` gathers a snapshot and keeps it as the latest, whose listings and spot the sampler reads.
- * - `loopDeps.quote` takes a strategy token (12/min and the shared 20/min), sends the RFQ, then previews its gas and
+ * - `loopDeps.quote` takes a strategy token (`strategyRfqPerMin` and the shared hard cap), sends the RFQ, then previews its gas and
  *   checks the maker's signature.
  * - `loopDeps.execute` runs `sellOption` in the configured mode; only live has a signer.
  * - Executions are serialized by the loop (`memo.inFlight`), so no other execution is ever in flight
@@ -84,8 +84,8 @@ const GIT_TIMEOUT_MS = 2_000;
  *   shared hard cap: waiting for one would spend the quote's TTL. There is at most one per execution, and executions
  *   are few: they run one at a time, each after its own RFQ round trip and gas preview; a side whose confirm was sent
  *   cools down (60 s after a refusal or revert, else until the fill or other evidence shows), and one that aborted
- *   before the confirm backs its key off. With the config keeping `strategyRfqPerMin + samplerRfqPerMin` at most 18,
- *   the 2 a minute left under the 20-a-minute hard cap cover the re-quotes.
+ *   before the confirm backs its key off. With the config keeping `strategyRfqPerMin + samplerRfqPerMin` at most 58,
+ *   the 2 a minute left under the 60-a-minute hard cap cover the re-quotes.
  * - Every record (the loop's, `sellOption`'s and the sampler's) goes through one redacting recorder, which replaces
  *   the RPC URL and provider keys with `<rpc>` (`redactRecord`).
  */
@@ -109,10 +109,18 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   const socketFor = (component: string): JsonRpcSocket =>
     new JsonRpcSocket({ url: config.rysk.wsUrl, logger: log.child({ component }) });
   const strategySocket = socketFor('strategy-socket');
-  const samplerSocket = socketFor('sampler-socket');
+  // One socket per sampler lane (`sampler.parallel`): a socket carries one RFQ at a time.
+  const samplerSockets = Array.from({ length: config.sampler.parallel }, (_, i) =>
+    socketFor(`sampler-socket-${i + 1}`),
+  );
   const takerClock = { nowSec: clock.serverNowSec, nowMs: clock.nowMs };
   const strategyTaker = new RyskTaker(strategySocket, takerClock);
-  const samplerTaker = new RyskTaker(samplerSocket, takerClock);
+  const [firstSamplerSocket, ...moreSamplerSockets] = samplerSockets;
+  if (firstSamplerSocket === undefined) throw new Error('sampler.parallel must be at least 1');
+  const samplerTakers: SamplerDeps['takers'] = [
+    new RyskTaker(firstSamplerSocket, takerClock),
+    ...moreSamplerSockets.map((socket) => new RyskTaker(socket, takerClock)),
+  ];
 
   const { publicClient, walletClient } = createChainClients({
     rpcUrl,
@@ -265,7 +273,7 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   };
 
   const samplerDeps: SamplerDeps = {
-    taker: samplerTaker,
+    takers: samplerTakers,
     rest,
     recorder,
     bucket: samplerBucket,
@@ -283,7 +291,7 @@ export function wireDaemon(config: AppConfig, opts: WireOptions): Wired {
   return {
     loopDeps,
     samplerDeps,
-    sockets: [strategySocket, samplerSocket],
+    sockets: [strategySocket, ...samplerSockets],
     version,
     tradeDeps,
     envelope,

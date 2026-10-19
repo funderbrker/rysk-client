@@ -60,7 +60,7 @@
     "replanSec": 300,
     "prefilterRatio": 0.5,
     "strategyRfqPerMin": 12,
-    "samplerRfqPerMin": 6
+    "samplerRfqPerMin": 40
   },
   "safety": {
     "maxGasFeeUsd": "0.5",
@@ -87,7 +87,8 @@
   },
   "sampler": {
     "enabled": true,
-    "sweepEveryMin": 60,
+    "parallel": 2,
+    "sweepEveryMin": 5,
     "pinned": 4,
     "pinnedEveryMin": 5,
     "takerPairEveryMin": 60,

@@ -616,7 +616,7 @@ The `usage` values are far below the volume of recent fills, so their semantics 
 
 ### 13.4 Rate limits and chain limits
 
-- Rysk documents no API rate limits, and no limits were hit during light probing. For comparison, each open browser tab polls inventory every 2 s and re-fires RFQs at least every `validUntil - 20 s`, so the backend absorbs about 8 RFQ/s of public zero-address traffic. Staying at or below the app's cadence is a sensible ceiling. `bundle` `live` `inferred`
+- Rysk documents no API rate limits, and no limits were hit during light probing. For comparison, each open browser tab polls inventory every 2 s and re-fires RFQs at least every `validUntil - 20 s`, so the backend absorbs about 8 RFQ/s of public zero-address traffic. Staying at or below the app's cadence is a sensible ceiling; this client caps itself at a sustained 60 RFQ/min across the strategy and the sampler, with bursts of up to 60 (the bucket's capacity). `bundle` `live` `inferred`
 - The app's own fetch helper retries 3 times with exponential backoff (100 ms up to 5 s) within a 30 s budget, and dedupes referral calls for 2 s. `bundle`
 - The HyperEVM public RPC allows **100 requests/min per IP** and offers no WS. The mempool accepts only the next **8 nonces** per address. Small blocks arrive every 1 s with a 2M gas limit, which comfortably fits an ERC-20 approve. EIP-1559 applies and the gas token is HYPE (18 dp). `hyperliquid`
 

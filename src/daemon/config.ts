@@ -30,6 +30,11 @@ export type AppConfig = {
  */
 export type SamplerConfig = {
   enabled: boolean;
+  /**
+   * Sockets (takers) the wiring opens for the sampler, one RFQ in flight each (spec §9.2); 1–8. `runSampler` itself
+   * uses whatever takers it is given.
+   */
+  parallel: number;
   sweepEveryMin: number;
   pinned: number;
   pinnedEveryMin: number;
@@ -231,6 +236,7 @@ const configFile = z.strictObject({
   }),
   sampler: z.strictObject({
     enabled: z.boolean(),
+    parallel: positiveCount.max(8),
     sweepEveryMin: count,
     pinned: count,
     pinnedEveryMin: count,
@@ -352,7 +358,7 @@ function checkQuoteTtl(file: ConfigFile): void {
 }
 
 /**
- * Spec §8.7: the strategy and the sampler share the 20-a-minute hard cap, and an execution's re-quote does not take
+ * Spec §8.7: the strategy and the sampler share the hard cap (`HARD_CAP_RFQ_PER_MIN`), and an execution's re-quote does not take
  * from it (waiting would spend the quote's TTL), so the two loops together keep 2 a minute free for re-quotes.
  */
 function checkRfqRates(file: ConfigFile): void {

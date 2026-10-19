@@ -277,7 +277,7 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `quoting.replanSec` | s | Re-plan delay after an `apr-floor` hold. |
 | `quoting.prefilterRatio` | ratio | Quote only listings whose indicative APR ≥ `minApr × ratio`. When that would quote nothing, the top listings are quoted anyway. |
 | `quoting.strategyRfqPerMin` | integer ≥ 1 | The strategy's token bucket. |
-| `quoting.samplerRfqPerMin` | integer ≥ 1 | The sampler's token bucket. The sum of both must be ≤ 18 a minute (a hard cap of 20, minus 2 for requotes). |
+| `quoting.samplerRfqPerMin` | integer ≥ 1 | The sampler's token bucket, shared by all its sockets. The sum of both must be ≤ 58 a minute (a hard cap of 60, one a second, minus 2 for requotes). Rysk documents no limit; the app's own public traffic runs near 8 RFQs a second. |
 | `safety.maxGasFeeUsd` | USD string | The highest `/api/gas` fee accepted. |
 | `safety.maxGasFeeBps` | integer bps of premium | The highest gas fee as a share of the premium. |
 | `safety.minNetPremiumUsd` | USD string | The net premium floor for every trade. |
@@ -300,9 +300,10 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `safety.maxHypeExposurePct` | % \| null | S5: hold puts while HYPE is more than this share of HYPE plus put capital. |
 | `safety.pauseOnFrontendChange` | boolean | Hold every new trade, in both modes, after the Rysk frontend `sha` changes, until restart. |
 | `sampler.enabled` | boolean | The research sampler. Also turned off by `run --no-sampler`. |
-| `sampler.sweepEveryMin` | minutes, 0 = off | Every listed HYPE instrument, both sides, every product leg, from the zero address. A leg whose instrument is no longer listed when its turn comes is skipped (no RFQ, no token) and counted in the sweep's `sweep-summary` record. |
+| `sampler.parallel` | integer 1–8 | Sockets for the sampler's RFQs; each group of RFQs goes to the first free one. A socket carries one RFQ at a time, and an RFQ takes about 2.4 s (the makers' bidding window) plus the taker's 250 ms pacing, so one socket manages about 22 a minute and two reach the 40-a-minute budget. The token bucket still bounds the total; more sockets only concentrate the same RFQs into shorter bursts. |
+| `sampler.sweepEveryMin` | minutes, 0 = off | Every listed HYPE instrument, both sides, every product leg, from the zero address, at a fixed rate: the next sweep starts this long after the previous one started, or at once after a longer sweep. At the defaults (48 legs over 2 sockets) a sweep takes about 65 s. A leg whose instrument is no longer listed when its turn comes is skipped (no RFQ, no token) and counted in the sweep's `sweep-summary` record. |
 | `sampler.pinned` | integer | How many pinned instruments: the ~0.10 and ~0.25 delta of the nearest expiry, both sides. |
-| `sampler.pinnedEveryMin` | minutes, 0 = off | The pinned series' cadence. Instruments are kept for their lifetime. |
+| `sampler.pinnedEveryMin` | minutes, 0 = off | The pinned series' cadence, at the same fixed rate. Instruments are kept for their lifetime. |
 | `sampler.takerPairEveryMin` | minutes, 0 = off | The first pinned instrument quoted from `account.address` and from the zero address, back to back. |
 | `sampler.inventoryEveryMin` | minutes, 0 = off | A full record of the HYPE listings and HYPE caps at this interval. In between they are checked every minute, and a change of the listed set or a cap limit writes a small `changed` record with only the difference. |
 | `sampler.publicFillsEveryMin` | minutes, 0 = off | Rysk's public fills since the last window. |
@@ -366,12 +367,12 @@ sudoedit /etc/rysk-wheel/keystore.password      # one line: the keystore passwor
 
 **Docker.** The lock decides staleness by checking whether the recorded pid is running. That assumes pids are not reused across restarts, but in a container the daemon is often pid 1 on every start, so a stale lock from a crash looks held. **systemd is the supported runner.** If you must use a container, remove `live.lock` in the entrypoint only when you know no other instance shares the data directory.
 
-**Data growth.** The daemon never rotates its files; files are per UTC day, so rotate or compress old ones with your own tooling. Plan for **about 25–30 MB a day with the sampler on** at the default 60 s tick. The record sizes were measured in the [validation run](#validation); the inventory figure is computed for its difference records, which came after it:
+**Data growth.** The daemon never rotates its files; files are per UTC day, so rotate or compress old ones with your own tooling. Plan for **about 35–45 MB a day with the sampler on** at the default 60 s tick and 5-minute sweeps. The record sizes were measured in the [validation run](#validation); the inventory figure is computed for its difference records, which came after it:
 
 | stream | per day | why |
 |---|---|---|
 | inventory | ≈ 14 MB | A full record (about 45 KB) every 5 minutes. Rysk regenerates the listed strikes as spot moves, so between them a `changed` record of well under 1 KB is written about once a minute. |
-| quotes | ≈ 5 MB | About 1 KB per RFQ, about 190 RFQs an hour. |
+| quotes | ≈ 15 MB | About 1 KB per RFQ; a 48-leg sweep every 5 minutes plus the pinned series is about 620 RFQs an hour. |
 | state and decisions | 5–10 MB | 1.4 KB a tick, plus 1–3 KB per side. |
 | public fills | under 1 MB | |
 
@@ -387,6 +388,8 @@ Every stream is append-only JSONL at `<dataDir>/<stream>/YYYY-MM-DD.jsonl` (UTC 
 - `configHash` is the first 16 hex characters of the config file's SHA-256.
 
 **Units.** Every `*E18`, `*E8` and `*6` field is a decimal string. Every record, the loop's, `sellOption`'s and the sampler's, goes through one redacting recorder (the logger's redaction), so the RPC URL and provider keys never appear in them.
+
+**Collecting without trading.** For a data-only run, no wallet is needed: keep the example's zero address, set `"enabled": false` and both sides' `enabled` to false, and set `"takerPairEveryMin": 0` (with the zero address both legs of the pair would be the same RFQ). The zero anchor is fine with calls disabled, and the default RFQ budget already covers 5-minute sweeps. `pnpm rysk run` then only records.
 
 **Sharing.** Some streams are market data; others describe the wallet.
 - **Shareable:** the sampler's `quotes` records (zero-address RFQs), `inventory` and `public-fills`. One exception: the taker pair's `self` leg (`takerKind: "self"`) is an RFQ from the wallet, and Rysk's public RFQ channel shows its taker, so drop those records first.
@@ -512,10 +515,10 @@ The run stopped by itself (exit 0) after 15 minutes, at its first dry-run execut
 - **Custom strikes need trading volume.** The RFQ server treats a strike that is not in the current inventory for that expiry as custom. It refuses it (JSON-RPC error `-32603`) unless the taker wallet has at least 250 000 USD of notional trading volume: `custom strikes require >= 250000 notional volume (have 0)`. A strike refused while unlisted was quoted 17 minutes later, once the inventory listed it again. A few strikes were still quoted after they left the inventory, presumably within the server's refresh lag. A taker with enough volume was quoted an unlisted strike. In practice:
   - For a fresh wallet, `call.fallback.customStrikeFirst` costs one refused RFQ each time the custom strike's backoff lapses (5 minutes, doubling up to an hour); the listed fallback strike is still quoted.
   - The zero-address sampler's pinned series can lose its quotes once its strikes are de-listed.
-  - A full sweep takes about 25 minutes at 6 RFQ a minute, while the listed strikes change about every minute. In the validation run 37 of 100 RFQs hit strikes that were no longer listed. The sweep now skips a leg whose instrument is not listed when its turn comes and counts it in `skippedUnlisted`, so a sweep covers fewer legs than it planned.
+  - In the validation run a full sweep took about 25 minutes at 6 RFQ a minute (now about a minute over two sockets), while the listed strikes change about every minute. In the validation run 37 of 100 RFQs hit strikes that were no longer listed. The sweep now skips a leg whose instrument is not listed when its turn comes and counts it in `skippedUnlisted`, so a sweep covers fewer legs than it planned.
 - **A fresh process waits about 15 minutes** (`settlementGraceSec`) before its first strategy RFQ. Live also needs `startupQuietSec`, which runs at the same time. The sampler starts at once.
 - **`fallback.scope: "all-listed"` lengthens the call-side tenor check.** C11's maximum tenor becomes `max(366 d, maxDaysToExpiry)`, so a far-dated listing above the basis can execute. Puts keep their window.
-- **The execution requote is outside the RFQ buckets.** Waiting for a token would spend the quote's TTL. The config keeps `strategyRfqPerMin + samplerRfqPerMin ≤ 18` under the hard cap of 20; there is at most one requote per execution.
+- **The execution requote is outside the RFQ buckets.** Waiting for a token would spend the quote's TTL. The config keeps `strategyRfqPerMin + samplerRfqPerMin ≤ 58` under the hard cap of 60; there is at most one requote per execution.
 - **`*EveryMin: 0` turns a sampler stream off.** `*RfqPerMin` must be positive.
 - **The lock takeover can race.** When two instances start at the same moment against a stale lock, the second one's removal of the stale file can delete the first one's fresh lock, and both then run. Start one instance per wallet, under one supervisor.
 - **Docker reuses pids.** See [Running in production](#running-in-production).

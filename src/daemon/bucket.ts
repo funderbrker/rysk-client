@@ -2,8 +2,12 @@ import type { Clock } from '../lib/time.ts';
 
 const MINUTE_MS = 60_000;
 
-/** Spec §8.7: every strategy and sampler RFQ also takes a token from this shared limit (a sustained rate). */
-export const HARD_CAP_RFQ_PER_MIN = 20;
+/**
+ * Spec §8.7: every strategy and sampler RFQ also takes a token from this shared limit (a sustained rate). One a
+ * second: Rysk documents no limit, and the app's public zero-address traffic alone runs near 8 RFQ/s (protocol doc
+ * §13.4), so this stays an order of magnitude below what the backend already absorbs.
+ */
+export const HARD_CAP_RFQ_PER_MIN = 60;
 /**
  * The part of the hard cap the strategy and sampler rates leave free (a config rule) for execution re-quotes, which are
  * sent without a token. There is at most one per execution, and executions are few: they run one at a time, each after

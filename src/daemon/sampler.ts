@@ -17,8 +17,11 @@ import type { Recorder, RecordStream } from './recorder.ts';
 import { type SampleContext, type SampleOutcome, sampleQuoteRecord } from './records.ts';
 
 export type SamplerDeps = {
-  /** The sampler's own taker, on its own socket (spec §9.2); never asked to confirm. */
-  taker: Pick<RyskTaker, 'requestQuote'>;
+  /**
+   * The sampler's own takers, one socket each (spec §9.2), never asked to confirm. A socket carries one RFQ at a
+   * time, so each RFQ group goes to the first free taker: `takers.length` is the sampler's parallelism.
+   */
+  takers: [Pick<RyskTaker, 'requestQuote'>, ...Pick<RyskTaker, 'requestQuote'>[]];
   rest: Pick<RyskRest, 'caps' | 'publicHistory'>;
   recorder: Pick<Recorder, 'append'>;
   /** The sampler's RFQ rate limit (spec §8.7); every sampler RFQ takes a token first. */
@@ -49,8 +52,21 @@ export const SAMPLE_QUANTITY_E18 = 25n * 10n ** 18n;
 
 type Purpose = SampleContext['purpose'];
 
-/** A sampler stream: a run, then `delayMs` of sleep, until aborted. */
-type Stream = { name: string; delayMs: number; needsListings: boolean; run: (run: number) => Promise<void> };
+/** A sampler stream: a run every `periodMs` from the start of the previous one (at once after a longer run), until aborted. */
+type Stream = { name: string; periodMs: number; needsListings: boolean; run: (run: number) => Promise<void> };
+
+/** One taker (one socket) and whether a group is in flight on it. */
+type Lane = { taker: Pick<RyskTaker, 'requestQuote'>; busy: boolean };
+
+/** An RFQ group waiting for a free lane, and the promise its stream awaits. */
+type QueuedGroup = {
+  purpose: Purpose;
+  run: number;
+  requests: QuoteRequest[];
+  tally: SweepTally | undefined;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+};
 
 /** What the inventory stream compares: each listing's products by instrument key, each cap's limit by name and type. */
 type InventoryContent = {
@@ -73,8 +89,9 @@ type Sampler = {
   deps: SamplerDeps;
   cfg: SamplerConfig;
   random: () => number;
-  /** Settles when the last queued RFQ group is done: groups reach the socket one at a time, in order. */
-  rfqTail: Promise<void>;
+  /** One lane per taker, and the groups waiting for a free one (FIFO across the streams). */
+  lanes: Lane[];
+  queue: QueuedGroup[];
   /** Chosen on the first run that needs them, kept until they expire. */
   pinned: Listing[];
   /** The cap names (lowercase) the inventory stream records: GLOBAL, HYPE and the sampled tokens'. */
@@ -138,12 +155,14 @@ export function pickPinned(listings: Listing[], n = 4): Listing[] {
 }
 
 /**
- * The research sampler (spec §9.2): one fixed-delay loop per stream whose `*EveryMin` is not 0, until `signal`
- * aborts. The RFQ streams (sweep, pinned, taker pair) and the inventory snapshot first wait for listings.
+ * The research sampler (spec §9.2): one fixed-rate loop per stream whose `*EveryMin` is not 0, until `signal`
+ * aborts: a run starts every `*EveryMin` from the start of the previous one, or at once after a run that took
+ * longer, and runs of one stream never overlap. The RFQ streams (sweep, pinned, taker pair) and the inventory
+ * snapshot first wait for listings.
  *
- * - sweep: `buildSweep` over the live listings, every `sweepEveryMin` after the last sweep ended; a leg whose
- *   instrument is no longer listed when its turn comes is skipped (no RFQ, no token), and a finished sweep writes
- *   one `sweep-summary` record to `quotes` with its legs, the RFQs sent and the legs skipped;
+ * - sweep: `buildSweep` over the live listings, all its groups queued at once; a leg whose instrument is no longer
+ *   listed when its turn comes is skipped (no RFQ, no token), and a finished sweep writes one `sweep-summary` record
+ *   to `quotes` with its legs, the RFQs sent and the legs skipped;
  * - pinned: `pickPinned`'s instruments in the traded products, kept for their lifetime (quoted as custom strikes once
  *   de-listed) and re-picked once they expire;
  * - taker pair: the first pinned instrument from `self` and from the zero address, back to back;
@@ -153,9 +172,10 @@ export function pickPinned(listings: Listing[], n = 4): Listing[] {
  * - public fills: `publicHistory` since the last window (overlapping it; the first since startup), one record per fill
  *   new to this run.
  *
- * Every RFQ waits while a trade executes, then for a bucket token, and is recorded in `quotes` whatever its outcome.
- * RFQ groups (a listing's legs, the taker pair) are sent back to back, one group at a time across the streams. The
- * sampler never confirms. A failed run is logged and the stream carries on.
+ * Every RFQ waits while a trade executes, then for a bucket token (the rate limit holds across the lanes), and is
+ * recorded in `quotes` whatever its outcome, unless shutdown cut it off. RFQ groups (a listing's legs, the taker
+ * pair) go to the first free lane and are sent back to back on it, one group at a time per lane, across the
+ * streams. The sampler never confirms. A failed run is logged and the stream carries on.
  */
 export async function runSampler(deps: SamplerDeps, cfg: SamplerConfig): Promise<void> {
   if (!cfg.enabled) return;
@@ -163,7 +183,8 @@ export async function runSampler(deps: SamplerDeps, cfg: SamplerConfig): Promise
     deps,
     cfg,
     random: deps.random ?? Math.random,
-    rfqTail: Promise.resolve(),
+    lanes: deps.takers.map((taker) => ({ taker, busy: false })),
+    queue: [],
     pinned: [],
     hypeCapNames: hypeCapNames([TOKENS.WHYPE.address, ...cfg.putStables, ...cfg.callCollaterals]),
     inventory: null,
@@ -177,14 +198,14 @@ export async function runSampler(deps: SamplerDeps, cfg: SamplerConfig): Promise
     {
       name: 'inventory',
       everyMin: cfg.inventoryEveryMin,
-      delayMs: Math.min(INVENTORY_CHECK_MS, inventoryMs),
+      periodMs: Math.min(INVENTORY_CHECK_MS, inventoryMs),
       needsListings: true,
       run: () => inventoryCheck(sampler, inventoryMs),
     },
     {
       name: 'public-fills',
       everyMin: cfg.publicFillsEveryMin,
-      delayMs: cfg.publicFillsEveryMin * MINUTE_MS,
+      periodMs: cfg.publicFillsEveryMin * MINUTE_MS,
       needsListings: false,
       run: () => publicFills(sampler),
     },
@@ -193,13 +214,15 @@ export async function runSampler(deps: SamplerDeps, cfg: SamplerConfig): Promise
 }
 
 function rfqStream(name: Purpose, everyMin: number, run: (run: number) => Promise<void>) {
-  return { name, everyMin, delayMs: everyMin * MINUTE_MS, needsListings: true, run };
+  return { name, everyMin, periodMs: everyMin * MINUTE_MS, needsListings: true, run };
 }
 
+/** Runs the stream at a fixed rate: the next run starts `periodMs` after the previous one started, or at once. */
 async function schedule(sampler: Sampler, stream: Stream): Promise<void> {
   const { deps } = sampler;
   if (stream.needsListings && !(await untilListed(deps))) return;
   for (let run = 1; !deps.signal.aborted; run++) {
+    const startedAtMs = deps.clock.nowMs();
     try {
       await stream.run(run);
     } catch (error) {
@@ -207,24 +230,25 @@ async function schedule(sampler: Sampler, stream: Stream): Promise<void> {
         deps.log?.warn({ err: error, stream: stream.name, run }, 'sampler run failed');
       }
     }
-    await pause(deps, stream.delayMs);
+    const elapsedMs = Math.max(0, deps.clock.nowMs() - startedAtMs);
+    if (elapsedMs < stream.periodMs) await pause(deps, stream.periodMs - elapsedMs);
   }
 }
 
 /**
- * One sweep, built from the listings at its start. At 6 RFQ a minute it lasts about 25 minutes while the listed
- * strikes change about every minute, so each leg is sent only while its instrument is still listed: an unlisted one
- * is a custom strike, which the server refuses for the zero taker. A sweep that finishes records its tally.
+ * One sweep, built from the listings at its start and queued whole, so it runs as fast as the lanes and the bucket
+ * allow. The listed strikes change about every minute, so each leg is sent only while its instrument is still
+ * listed: an unlisted one is a custom strike, which the server refuses for the zero taker. Every group is waited for,
+ * so two sweeps never overlap; then a group that threw fails the run (logged), else the tally is recorded.
  */
 async function sweep(sampler: Sampler, run: number): Promise<void> {
   const { deps, cfg, random } = sampler;
   const listings = liveListings(deps);
   const requests = buildSweep(listings, cfg, SAMPLE_QUANTITY_E18, random);
   const tally: SweepTally = { sent: 0, skippedUnlisted: 0 };
-  for (const group of byInstrument(requests)) {
-    if (deps.signal.aborted) return;
-    await quoteGroup(sampler, 'sweep', run, group, tally);
-  }
+  const groups = byInstrument(requests).map((group) => quoteGroup(sampler, 'sweep', run, group, tally));
+  const failed = (await Promise.allSettled(groups)).find((g) => g.status === 'rejected');
+  if (failed !== undefined) throw failed.reason;
   if (deps.signal.aborted) return;
   record(deps, 'quotes', { purpose: 'sweep-summary', run, legs: requests.length, ...tally });
 }
@@ -255,7 +279,8 @@ function currentPinned(sampler: Sampler): Listing[] {
 }
 
 /**
- * Queues `requests` to be sent back to back after every group queued before; settles when they are done. With a
+ * Queues `requests` for the first lane to come free (FIFO across the streams); on it they are sent back to back, so a
+ * group never splits across sockets and a socket never carries two RFQs at once. Settles when they are done. With a
  * `tally` (the sweep), a request whose instrument is no longer listed is skipped and counted there.
  */
 function quoteGroup(
@@ -265,20 +290,38 @@ function quoteGroup(
   requests: QuoteRequest[],
   tally?: SweepTally,
 ): Promise<void> {
-  const done = sampler.rfqTail.then(() => sendEach(sampler, purpose, run, requests, tally));
-  sampler.rfqTail = done.catch(() => {});
-  return done;
+  return new Promise<void>((resolve, reject) => {
+    sampler.queue.push({ purpose, run, requests, tally, resolve, reject });
+    drain(sampler);
+  });
+}
+
+/** Hands queued groups to idle lanes; a lane takes the next group as soon as its current one is done. */
+function drain(sampler: Sampler): void {
+  for (const lane of sampler.lanes) {
+    if (lane.busy) continue;
+    const next = sampler.queue.shift();
+    if (next === undefined) return;
+    lane.busy = true;
+    sendEach(sampler, lane.taker, next.purpose, next.run, next.requests, next.tally)
+      .then(next.resolve, next.reject)
+      .finally(() => {
+        lane.busy = false;
+        drain(sampler);
+      });
+  }
 }
 
 async function sendEach(
   sampler: Sampler,
+  taker: Pick<RyskTaker, 'requestQuote'>,
   purpose: Purpose,
   run: number,
   requests: QuoteRequest[],
   tally: SweepTally | undefined,
 ): Promise<void> {
   for (const request of requests) {
-    const sent = await sendOne(sampler, purpose, run, request, tally !== undefined);
+    const sent = await sendOne(sampler, taker, purpose, run, request, tally !== undefined);
     if (sent === 'aborted') return;
     if (tally !== undefined) {
       if (sent === 'sent') tally.sent += 1;
@@ -290,10 +333,12 @@ async function sendEach(
 /**
  * Waits until no trade is executing and the bucket grants a token, then sends one RFQ and records it with the market
  * as the latest listings show it. With `onlyListed`, a request whose instrument the latest listings no longer hold
- * is skipped before it takes a token. `aborted` once aborted (an RFQ aborted in flight is not recorded).
+ * is skipped before it takes a token. `aborted` once aborted: an RFQ in flight at shutdown is not recorded, since
+ * closing the sockets answers it `socket-closed`, which says nothing about the market.
  */
 async function sendOne(
   sampler: Sampler,
+  taker: Pick<RyskTaker, 'requestQuote'>,
   purpose: Purpose,
   run: number,
   request: QuoteRequest,
@@ -307,7 +352,8 @@ async function sendOne(
     else if (deps.bucket.take()) break;
     else await pause(deps, Math.max(1, deps.bucket.waitMs()));
   }
-  // No await from the last `isExecuting()` and the token to `requestQuote`, so no execution can start between.
+  // No await between the last `isExecuting()`, the token and the call into `requestQuote`: no RFQ is decided while a
+  // trade executes (the frame itself may leave a moment later, after the taker's pacing gap or a reconnect).
   const sentAtMs = deps.clock.nowMs();
   const listings = deps.listings();
   const [latest] = listings;
@@ -324,7 +370,7 @@ async function sendOne(
   };
   let outcome: SampleOutcome;
   try {
-    const result = await deps.taker.requestQuote(request, {
+    const result = await taker.requestQuote(request, {
       timeoutMs: cfg.requestTimeoutMs,
       signal: deps.signal,
     });
@@ -335,6 +381,7 @@ async function sendOne(
     if (deps.signal.aborted) return 'aborted';
     outcome = { ok: false, error: 'rpc-error', message: messageOf(error), requestedAtMs: sentAtMs };
   }
+  if (deps.signal.aborted) return 'aborted';
   record(deps, 'quotes', sampleQuoteRecord(request, outcome, ctx));
   return 'sent';
 }
@@ -349,11 +396,13 @@ async function sendOne(
  */
 async function inventoryCheck(sampler: Sampler, intervalMs: number): Promise<void> {
   const { deps } = sampler;
+  // The check's time is its start: checks run on a fixed grid, so a slow caps read must not push a full record
+  // past its interval onto the next check.
+  const nowMs = deps.clock.nowMs();
   const listings = deps.listings();
   const parsed = parseCaps(await deps.rest.caps());
   const caps = parsed.caps.filter((cap) => sampler.hypeCapNames.has(cap.name.toLowerCase()));
   const content = inventoryContent(listings, caps);
-  const nowMs = deps.clock.nowMs();
   const last = sampler.inventory;
   const inventoryTs = listings[0]?.observedAtSec ?? null;
   const contentHash = content.hash;

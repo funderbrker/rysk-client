@@ -123,7 +123,7 @@ describe('loadConfig on config.example.json', () => {
         replanSec: 300,
         prefilterRatio: 0.5,
         strategyRfqPerMin: 12,
-        samplerRfqPerMin: 6,
+        samplerRfqPerMin: 40,
       },
       safety: {
         maxGasFee6: 500000n,
@@ -165,7 +165,8 @@ describe('loadConfig on config.example.json', () => {
       wheel,
       sampler: {
         enabled: true,
-        sweepEveryMin: 60,
+        parallel: 2,
+        sweepEveryMin: 5,
         pinned: 4,
         pinnedEveryMin: 5,
         takerPairEveryMin: 60,
@@ -388,6 +389,7 @@ const INTEGER_FIELDS = [
   'safety.maxFeePerGasGwei',
   'safety.confirmTimeoutMs',
   'safety.unknownMaxWaitSec',
+  'sampler.parallel',
   'sampler.sweepEveryMin',
   'sampler.pinned',
   'sampler.pinnedEveryMin',
@@ -542,18 +544,28 @@ describe('validation', () => {
 });
 
 describe('RFQ rates (spec §8.7)', () => {
-  it('keeps the strategy and sampler rates at most 18 a minute together, 2 under the hard cap', () => {
+  it('keeps the strategy and sampler rates at most 58 a minute together, 2 under the hard cap', () => {
     const rates = (strategy: number, sampler: number) =>
       exampleWith({ 'quoting.strategyRfqPerMin': strategy, 'quoting.samplerRfqPerMin': sampler });
-    expect(parseConfig(rates(12, 6), DRY).wheel.quoting).toMatchObject({
+    expect(parseConfig(rates(12, 46), DRY).wheel.quoting).toMatchObject({
       strategyRfqPerMin: 12,
-      samplerRfqPerMin: 6,
+      samplerRfqPerMin: 46,
     });
-    expect(parseConfig(rates(17, 1), DRY).wheel.quoting.strategyRfqPerMin).toBe(17);
+    expect(parseConfig(rates(57, 1), DRY).wheel.quoting.strategyRfqPerMin).toBe(57);
 
-    const error = configError(() => parseConfig(rates(12, 7), DRY));
+    const error = configError(() => parseConfig(rates(12, 47), DRY));
     expect(error.path).toBe('quoting.strategyRfqPerMin');
-    expect(error.message).toContain('exceeds 18 a minute');
-    expect(configError(() => parseConfig(rates(18, 1), DRY)).path).toBe('quoting.strategyRfqPerMin');
+    expect(error.message).toContain('exceeds 58 a minute');
+    expect(configError(() => parseConfig(rates(58, 1), DRY)).path).toBe('quoting.strategyRfqPerMin');
+  });
+
+  it('bounds sampler.parallel to 1–8 sockets', () => {
+    expect(parseConfig(exampleWith({ 'sampler.parallel': 8 }), DRY).sampler.parallel).toBe(8);
+    expect(configError(() => parseConfig(exampleWith({ 'sampler.parallel': 0 }), DRY)).path).toBe(
+      'sampler.parallel',
+    );
+    expect(configError(() => parseConfig(exampleWith({ 'sampler.parallel': 9 }), DRY)).path).toBe(
+      'sampler.parallel',
+    );
   });
 });

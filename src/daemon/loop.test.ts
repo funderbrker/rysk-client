@@ -133,6 +133,7 @@ function appConfig(mode: Mode, patch: Partial<AppConfig> = {}, wheel: ConfigPatc
     wheel: wheelConfig({ mode, put: minApr, call: minApr, ...wheel }),
     sampler: {
       enabled: false,
+      parallel: 1,
       sweepEveryMin: 60,
       pinned: 4,
       pinnedEveryMin: 5,

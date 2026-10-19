@@ -72,8 +72,9 @@ describe('wireDaemon', () => {
       trade.collateral.approve(TOKENS.USDC.address, ADDRESSES.marginPool, 1_000000n),
     ).rejects.toThrow('wallet client');
 
-    expect(wired.sockets).toHaveLength(2);
-    expect(wired.sockets[0]).not.toBe(wired.sockets[1]);
+    // The strategy's socket and one per sampler lane, all distinct.
+    expect(wired.sockets).toHaveLength(1 + cfg.sampler.parallel);
+    expect(new Set(wired.sockets).size).toBe(wired.sockets.length);
     expect(wired.envelope).toMatchObject({
       mode: 'dry-run',
       configHash: '0123456789abcdef',
