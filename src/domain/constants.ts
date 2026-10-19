@@ -56,11 +56,13 @@ export const TRADED_PRODUCTS: { put: Product; call: Product } = {
   },
 };
 
-export const SAMPLED_PUT_STABLES: Address[] = [TOKENS.USDC.address, TOKENS.USDT0.address];
 /**
- * WHYPE only: the kHYPE, LHYPE and wstHYPE call legs were dropped on the operator's ruling that no makers quote
- * them. Their tokens stay in `TOKENS` so a wallet row collateralized in one still classifies (`hypeForeignCollateral`).
+ * The sampler's legs are the traded products' only. The USDT0 put leg was dropped once the data showed it priced
+ * the same as USDC; the kHYPE, LHYPE and wstHYPE call legs on the operator's ruling that no makers quote them. The
+ * tokens stay in `TOKENS` so a wallet row in one of them still classifies (`whypeCallOtherUsd`,
+ * `hypeForeignCollateral`) and the wallet's USDT0 balance is still read.
  */
+export const SAMPLED_PUT_STABLES: Address[] = [TOKENS.USDC.address];
 export const SAMPLED_CALL_COLLATERALS: Address[] = [TOKENS.WHYPE.address];
 
 /**

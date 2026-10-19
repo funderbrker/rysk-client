@@ -172,7 +172,7 @@ describe('loadConfig on config.example.json', () => {
         inventoryEveryMin: 5,
         publicFillsEveryMin: 60,
         requestTimeoutMs: 6000,
-        putStables: [TOKENS.USDC.address, TOKENS.USDT0.address],
+        putStables: [TOKENS.USDC.address],
         callCollaterals: [TOKENS.WHYPE.address],
       },
       warnings: [],
@@ -301,14 +301,14 @@ describe('normalization', () => {
     const config = parseConfig(
       exampleWith({
         'account.address': ANVIL0.toLowerCase(),
-        'sampler.putStables': ['USDC', 'Usdt0'],
+        'sampler.putStables': ['Usdc'],
         'sampler.callCollaterals': ['WHYPE'],
       }),
       DRY,
     );
     expect(config.account.address).toBe(ANVIL0);
     expect(config.wheel.self).toBe(ANVIL0);
-    expect(config.sampler.putStables).toEqual([TOKENS.USDC.address, TOKENS.USDT0.address]);
+    expect(config.sampler.putStables).toEqual([TOKENS.USDC.address]);
     expect(config.sampler.callCollaterals).toEqual([TOKENS.WHYPE.address]);
   });
 
@@ -336,9 +336,9 @@ describe('normalization', () => {
       },
     ],
     [
-      'every USD stable for puts and WHYPE for calls',
+      'USDC for puts and WHYPE for calls, in any case',
       {
-        'sampler.putStables': ['usdc', 'USDT0', 'usdh'],
+        'sampler.putStables': ['USDC'],
         'sampler.callCollaterals': ['WHYPE'],
       },
     ],
@@ -481,6 +481,13 @@ const INVALID: Invalid[] = [
     'account.address',
   ],
   ['an unknown put stable', { 'sampler.putStables': ['usdc', 'dai'] }, 'sampler.putStables[1]'],
+  ...['usdt0', 'usdh'].map(
+    (symbol): Invalid => [
+      `the dropped put stable ${symbol}`,
+      { 'sampler.putStables': ['usdc', symbol] },
+      'sampler.putStables[1]',
+    ],
+  ),
   ['an unknown call collateral', { 'sampler.callCollaterals': ['ubtc'] }, 'sampler.callCollaterals[0]'],
   ...['khype', 'lhype', 'wsthype'].map(
     (symbol): Invalid => [

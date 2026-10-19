@@ -94,7 +94,7 @@
     "inventoryEveryMin": 5,
     "publicFillsEveryMin": 60,
     "requestTimeoutMs": 6000,
-    "putStables": ["usdc", "usdt0"],
+    "putStables": ["usdc"],
     "callCollaterals": ["whype"]
   }
 }

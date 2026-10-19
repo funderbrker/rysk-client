@@ -25,7 +25,7 @@ export type AppConfig = {
 };
 
 /**
- * The research sampler (spec §9.2); `putStables` (USDC, USDT0, USDH) and `callCollaterals` (WHYPE only) are token
+ * The research sampler (spec §9.2); `putStables` (USDC only) and `callCollaterals` (WHYPE only) are token
  * addresses.
  */
 export type SamplerConfig = {
@@ -122,8 +122,8 @@ const address = z.string().transform((value, ctx) => {
   return z.NEVER;
 });
 
-/** The sampler's put legs: USD stables only (a put's strike asset and collateral). */
-const PUT_STABLES: readonly TokenKey[] = ['USDC', 'USDT0', 'USDH'];
+/** The sampler's put legs: USDC only. USDT0 was dropped once the data showed it priced the same as USDC. */
+const PUT_STABLES: readonly TokenKey[] = ['USDC'];
 /**
  * The sampler's call legs: WHYPE only. The kHYPE, LHYPE and wstHYPE legs were dropped on the operator's ruling that
  * no makers quote them.

@@ -80,7 +80,7 @@ describe('parseCli: quote', () => {
       '--collateral',
       'WHYPE',
       '--usd',
-      'USDT0',
+      'USDC',
       '--config',
       'other.json',
     ]);
@@ -91,7 +91,7 @@ describe('parseCli: quote', () => {
       expirySec: 1793347200,
       quantityE18: 50n * E18,
       collateral: 'whype',
-      usd: 'usdt0',
+      usd: 'usdc',
       config: 'other.json',
     });
   });
@@ -108,13 +108,13 @@ describe('parseCli: quote', () => {
       '--qty',
       '0.000000000000000001',
       '--usd',
-      'usdt0',
+      'USDC',
     ]);
     expect(command).toMatchObject({
       strikeE8: 7812345678n,
       quantityE18: 1n,
-      collateral: 'usdt0',
-      usd: 'usdt0',
+      collateral: 'usdc',
+      usd: 'usdc',
     });
   });
 
@@ -138,6 +138,7 @@ describe('parseCli: quote', () => {
     ],
     [['--side', 'call', '--strike', '95', '--expiry', '1793347200', '--collateral', 'usdc'], '--collateral'],
     [['--side', 'call', '--strike', '95', '--expiry', '1793347200', '--usd', 'usdh'], '--usd'],
+    [['--side', 'put', '--strike', '78.5', '--expiry', '1793347200', '--usd', 'usdt0'], '--usd'],
   ])('rejects %j naming %s', (args, flag) => {
     expect(usageError(['quote', ...args]).message).toContain(flag);
   });

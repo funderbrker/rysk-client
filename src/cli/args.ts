@@ -11,7 +11,7 @@ Commands:
   state [--config path]
       Print the derived wheel state and each side's gates.
   quote --side put|call --strike 78.5 --expiry <sec> [--qty 25]
-        [--collateral whype] [--usd usdc|usdt0] [--config path]
+        [--collateral whype] [--usd usdc] [--config path]
       Request one quote and print it; never trades.
   history --from <sec> --to <sec> --out <file> [--config path]
       Write the public fills in the window to a JSONL file.
@@ -33,7 +33,8 @@ export class UsageError extends Error {
   }
 }
 
-export type UsdSymbol = 'usdc' | 'usdt0';
+/** USDC only: the USDT0 product was dropped (priced the same as USDC). */
+export type UsdSymbol = 'usdc';
 /** WHYPE only: the liquid-staking collaterals were dropped (no makers quote them). */
 export type CallCollateralSymbol = 'whype';
 
@@ -67,7 +68,7 @@ type Values = Record<string, string | boolean | (string | boolean)[] | undefined
 
 const DEFAULT_CONFIG = 'config.json';
 const DEFAULT_QUANTITY = '25';
-const USD_SYMBOLS: readonly string[] = ['usdc', 'usdt0'];
+const USD_SYMBOLS: readonly string[] = ['usdc'];
 const CALL_COLLATERALS: readonly string[] = ['whype'];
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const INTEGER = /^[0-9]+$/;
@@ -166,7 +167,7 @@ function parseQuote(args: string[]): QuoteCommand {
     throw new UsageError(`--qty must be a positive number of contracts, not '${qty}'`);
   }
   const usd = (stringOf(values, 'usd') ?? 'usdc').toLowerCase();
-  if (!isUsdSymbol(usd)) throw new UsageError(`--usd must be usdc or usdt0, not '${usd}'`);
+  if (!isUsdSymbol(usd)) throw new UsageError(`--usd must be usdc, not '${usd}'`);
   return {
     cmd: 'quote',
     side,

@@ -208,7 +208,7 @@ Run every command as `pnpm rysk <command>`, or `node src/cli/main.ts <command>`.
 |---|---|
 | `run [--live] [--max-trades N] [--config path] [--no-sampler]` | Runs the daemon loop, plus the research sampler unless `--no-sampler` is given or `sampler.enabled` is false. Live needs `--live` and `mode: "live"`. `--max-trades N` exits after N completed executions. In live, that is every execution whose confirm was sent, whatever its outcome (`filled`, `unknown`, `reverted` or `confirm-rejected`), so `--max-trades 1` never sends a second confirm; in dry-run, the dry-run stop. |
 | `state [--config path]` | Prints the derived state (capital, basis, consistency, counts) and both sides' gate results from one snapshot. A fresh process always shows G3 holding. |
-| `quote --side put\|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral whype] [--usd usdc\|usdt0] [--config path]` | Requests one quote with `account.address` as the taker, then previews its gas and checks the maker signature. Prints price, premium, gas, TTL, our gross and net APR beside Rysk's, and spot. Never trades. A put's collateral is its `--usd`. |
+| `quote --side put\|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral whype] [--usd usdc] [--config path]` | Requests one quote with `account.address` as the taker, then previews its gas and checks the maker signature. Prints price, premium, gas, TTL, our gross and net APR beside Rysk's, and spot. Never trades. A put's collateral is its `--usd`. |
 | `history --from <sec> --to <sec> --out <file> [--config path]` | Writes Rysk's public fills in the window to a JSONL file, overwriting it. |
 | `wallet [--config path]` | Balances (native HYPE, WHYPE, USDC, USDT0), MarginPool allowances, vault counter and nonces, from one multicall. |
 | `basis suggest-anchor [--config path]` | Prints a basis anchor. Warns while a WHYPE-moving position awaits settlement. |
@@ -307,7 +307,7 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `sampler.inventoryEveryMin` | minutes, 0 = off | A full record of the HYPE listings and HYPE caps at this interval. In between they are checked every minute, and a change of the listed set or a cap limit writes a small `changed` record with only the difference. |
 | `sampler.publicFillsEveryMin` | minutes, 0 = off | Rysk's public fills since the last window. |
 | `sampler.requestTimeoutMs` | ms | The sampler's RFQ timeout. |
-| `sampler.putStables` | token symbols | The put legs of the sweep: USD stables only (`usdc`, `usdt0`, `usdh`). |
+| `sampler.putStables` | token symbols | The put legs of the sweep: `usdc` only. The USDT0 leg was dropped once the data showed it priced the same as USDC. |
 | `sampler.callCollaterals` | token symbols | The call legs of the sweep: `whype` only. The kHYPE, LHYPE and wstHYPE legs were dropped because no makers quote them. |
 
 ## Running in production
@@ -434,11 +434,6 @@ Shell one-liners with `jq`, and SQL for DuckDB (`duckdb` CLI or its Python packa
 # Bid-price time series per instrument and collateral (USD per contract), oldest first
 jq -r 'select(.outcome == "quote") | [.tsMs, .purpose, .instrument.key, (.instrument.collateralSymbol // .instrument.collateralAsset), (.quote.priceE18 | tonumber / 1e18)] | @tsv' data/quotes/*.jsonl
 
-# USDC vs USDT0 put legs of the same sweep: gross APR side by side
-jq -s 'map(select(.purpose == "sweep" and .instrument.isPut and .outcome == "quote"))
-  | group_by([.runId, .run, .instrument.key])
-  | map({key: .[0].instrument.key, apr: (map({(.instrument.usdSymbol): .aprGross}) | add)})' data/quotes/*.jsonl
-
 # Taker self vs zero: the two legs of each taker pair
 jq -s 'map(select(.purpose == "taker-pair" and .outcome == "quote"))
   | group_by([.runId, .run])
@@ -463,14 +458,6 @@ SELECT to_timestamp(tsMs / 1000) AS t, purpose, instrument.key AS instrument,
 FROM read_json_auto('data/quotes/*.jsonl', union_by_name = true)
 WHERE outcome = 'quote'
 ORDER BY instrument, collateral, t;
-
--- duckdb: USDC vs USDT0 put legs of each sweep
-SELECT instrument.key AS instrument, run, runId,
-       max(aprGross) FILTER (WHERE instrument.usdSymbol = 'USDC')  AS apr_usdc,
-       max(aprGross) FILTER (WHERE instrument.usdSymbol = 'USDT0') AS apr_usdt0
-FROM read_json_auto('data/quotes/*.jsonl', union_by_name = true)
-WHERE purpose = 'sweep' AND instrument.isPut AND outcome = 'quote'
-GROUP BY ALL ORDER BY instrument;
 
 -- duckdb: public fills de-duplicated by txHash
 SELECT count(DISTINCT lower(fill.txHash)) AS fills
@@ -515,7 +502,7 @@ The run stopped by itself (exit 0) after 15 minutes, at its first dry-run execut
 ## Limitations and open questions
 
 **Not built (v1).**
-- Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The sampler records USDT0 put quotes beside USDC; the liquid-staking call legs are not sampled either, since no makers quote them. The strategy trades only USDC puts and WHYPE calls.
+- Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The sampler no longer quotes them either: USDT0 priced the same as USDC in the first collected data, and no makers quote the liquid-staking call legs. The strategy trades only USDC puts and WHYPE calls.
 - Positions in other stables still count. A WHYPE call or put settled in USDT0 still moves WHYPE, so it counts for the basis ledger and locked capital, but such rows are never traded.
 - Wrapping native HYPE, early close, other underlyings, alerts, a database, multi-wallet, multi-host and testnet.
 

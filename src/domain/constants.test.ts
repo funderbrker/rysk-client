@@ -79,8 +79,8 @@ describe('domain constants', () => {
     });
   });
 
-  it('samples USDC/USDT0 puts and WHYPE calls only', () => {
-    expect(SAMPLED_PUT_STABLES).toEqual([TOKENS.USDC.address, TOKENS.USDT0.address]);
+  it('samples USDC puts and WHYPE calls only', () => {
+    expect(SAMPLED_PUT_STABLES).toEqual([TOKENS.USDC.address]);
     expect(SAMPLED_CALL_COLLATERALS).toEqual([TOKENS.WHYPE.address]);
   });
 });
