@@ -208,7 +208,7 @@ Run every command as `pnpm rysk <command>`, or `node src/cli/main.ts <command>`.
 |---|---|
 | `run [--live] [--max-trades N] [--config path] [--no-sampler]` | Runs the daemon loop, plus the research sampler unless `--no-sampler` is given or `sampler.enabled` is false. Live needs `--live` and `mode: "live"`. `--max-trades N` exits after N completed executions. In live, that is every execution whose confirm was sent, whatever its outcome (`filled`, `unknown`, `reverted` or `confirm-rejected`), so `--max-trades 1` never sends a second confirm; in dry-run, the dry-run stop. |
 | `state [--config path]` | Prints the derived state (capital, basis, consistency, counts) and both sides' gate results from one snapshot. A fresh process always shows G3 holding. |
-| `quote --side put\|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral whype\|khype\|lhype\|wsthype] [--usd usdc\|usdt0] [--config path]` | Requests one quote with `account.address` as the taker, then previews its gas and checks the maker signature. Prints price, premium, gas, TTL, our gross and net APR beside Rysk's, and spot. Never trades. A put's collateral is its `--usd`. |
+| `quote --side put\|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral whype] [--usd usdc\|usdt0] [--config path]` | Requests one quote with `account.address` as the taker, then previews its gas and checks the maker signature. Prints price, premium, gas, TTL, our gross and net APR beside Rysk's, and spot. Never trades. A put's collateral is its `--usd`. |
 | `history --from <sec> --to <sec> --out <file> [--config path]` | Writes Rysk's public fills in the window to a JSONL file, overwriting it. |
 | `wallet [--config path]` | Balances (native HYPE, WHYPE, USDC, USDT0), MarginPool allowances, vault counter and nonces, from one multicall. |
 | `basis suggest-anchor [--config path]` | Prints a basis anchor. Warns while a WHYPE-moving position awaits settlement. |
@@ -308,7 +308,7 @@ The config is validated strictly: unknown keys, wrong units and inconsistent pai
 | `sampler.publicFillsEveryMin` | minutes, 0 = off | Rysk's public fills since the last window. |
 | `sampler.requestTimeoutMs` | ms | The sampler's RFQ timeout. |
 | `sampler.putStables` | token symbols | The put legs of the sweep: USD stables only (`usdc`, `usdt0`, `usdh`). |
-| `sampler.callCollaterals` | token symbols | The call legs of the sweep: HYPE collaterals only (`whype`, `khype`, `lhype`, `wsthype`). |
+| `sampler.callCollaterals` | token symbols | The call legs of the sweep: `whype` only. The kHYPE, LHYPE and wstHYPE legs were dropped because no makers quote them. |
 
 ## Running in production
 
@@ -439,11 +439,6 @@ jq -s 'map(select(.purpose == "sweep" and .instrument.isPut and .outcome == "quo
   | group_by([.runId, .run, .instrument.key])
   | map({key: .[0].instrument.key, apr: (map({(.instrument.usdSymbol): .aprGross}) | add)})' data/quotes/*.jsonl
 
-# WHYPE / kHYPE / LHYPE / wstHYPE call legs of the same sweep
-jq -s 'map(select(.purpose == "sweep" and (.instrument.isPut | not) and .outcome == "quote"))
-  | group_by([.runId, .run, .instrument.key])
-  | map({key: .[0].instrument.key, price: (map({(.instrument.collateralSymbol): (.quote.priceE18 | tonumber / 1e18)}) | add)})' data/quotes/*.jsonl
-
 # Taker self vs zero: the two legs of each taker pair
 jq -s 'map(select(.purpose == "taker-pair" and .outcome == "quote"))
   | group_by([.runId, .run])
@@ -520,7 +515,7 @@ The run stopped by itself (exit 0) after 15 minutes, at its first dry-run execut
 ## Limitations and open questions
 
 **Not built (v1).**
-- Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The sampler records their quotes; the strategy trades only USDC puts and WHYPE calls.
+- Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The sampler records USDT0 put quotes beside USDC; the liquid-staking call legs are not sampled either, since no makers quote them. The strategy trades only USDC puts and WHYPE calls.
 - Positions in other stables still count. A WHYPE call or put settled in USDT0 still moves WHYPE, so it counts for the basis ledger and locked capital, but such rows are never traded.
 - Wrapping native HYPE, early close, other underlyings, alerts, a database, multi-wallet, multi-host and testnet.
 

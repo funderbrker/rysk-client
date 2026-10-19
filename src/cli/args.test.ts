@@ -78,7 +78,7 @@ describe('parseCli: quote', () => {
       '--qty',
       '50',
       '--collateral',
-      'kHYPE',
+      'WHYPE',
       '--usd',
       'USDT0',
       '--config',
@@ -90,7 +90,7 @@ describe('parseCli: quote', () => {
       strikeE8: 10000000n,
       expirySec: 1793347200,
       quantityE18: 50n * E18,
-      collateral: 'khype',
+      collateral: 'whype',
       usd: 'usdt0',
       config: 'other.json',
     });

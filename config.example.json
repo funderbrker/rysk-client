@@ -95,6 +95,6 @@
     "publicFillsEveryMin": 60,
     "requestTimeoutMs": 6000,
     "putStables": ["usdc", "usdt0"],
-    "callCollaterals": ["whype", "khype", "lhype", "wsthype"]
+    "callCollaterals": ["whype"]
   }
 }

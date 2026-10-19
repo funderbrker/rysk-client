@@ -173,19 +173,14 @@ describe('loadConfig on config.example.json', () => {
         publicFillsEveryMin: 60,
         requestTimeoutMs: 6000,
         putStables: [TOKENS.USDC.address, TOKENS.USDT0.address],
-        callCollaterals: [
-          TOKENS.WHYPE.address,
-          TOKENS.KHYPE.address,
-          TOKENS.LHYPE.address,
-          TOKENS.WSTHYPE.address,
-        ],
+        callCollaterals: [TOKENS.WHYPE.address],
       },
       warnings: [],
     });
   });
 
-  it('resolves the sampled call collaterals to 4 addresses', () => {
-    expect(loadConfig(EXAMPLE_PATH, READ_ONLY).sampler.callCollaterals).toHaveLength(4);
+  it('resolves the sampled call collaterals to WHYPE alone', () => {
+    expect(loadConfig(EXAMPLE_PATH, READ_ONLY).sampler.callCollaterals).toEqual([TOKENS.WHYPE.address]);
   });
 
   it('throws ConfigError for --live when the file says dry-run', () => {
@@ -307,14 +302,14 @@ describe('normalization', () => {
       exampleWith({
         'account.address': ANVIL0.toLowerCase(),
         'sampler.putStables': ['USDC', 'Usdt0'],
-        'sampler.callCollaterals': ['KHYPE', 'wstHYPE'],
+        'sampler.callCollaterals': ['WHYPE'],
       }),
       DRY,
     );
     expect(config.account.address).toBe(ANVIL0);
     expect(config.wheel.self).toBe(ANVIL0);
     expect(config.sampler.putStables).toEqual([TOKENS.USDC.address, TOKENS.USDT0.address]);
-    expect(config.sampler.callCollaterals).toEqual([TOKENS.KHYPE.address, TOKENS.WSTHYPE.address]);
+    expect(config.sampler.callCollaterals).toEqual([TOKENS.WHYPE.address]);
   });
 
   it.each<[string, Record<string, unknown>]>([
@@ -341,10 +336,10 @@ describe('normalization', () => {
       },
     ],
     [
-      'every USD stable for puts and every HYPE collateral for calls',
+      'every USD stable for puts and WHYPE for calls',
       {
         'sampler.putStables': ['usdc', 'USDT0', 'usdh'],
-        'sampler.callCollaterals': ['whype', 'kHYPE', 'lhype', 'WSTHYPE'],
+        'sampler.callCollaterals': ['WHYPE'],
       },
     ],
     ['equal quote TTL bounds', { 'safety.minQuoteTtlSec': 600, 'safety.maxQuoteTtlSec': 600 }],
@@ -487,10 +482,17 @@ const INVALID: Invalid[] = [
   ],
   ['an unknown put stable', { 'sampler.putStables': ['usdc', 'dai'] }, 'sampler.putStables[1]'],
   ['an unknown call collateral', { 'sampler.callCollaterals': ['ubtc'] }, 'sampler.callCollaterals[0]'],
+  ...['khype', 'lhype', 'wsthype'].map(
+    (symbol): Invalid => [
+      `the dropped call collateral ${symbol}`,
+      { 'sampler.callCollaterals': ['whype', symbol] },
+      'sampler.callCollaterals[1]',
+    ],
+  ),
   ['a HYPE token as a put stable', { 'sampler.putStables': ['usdc', 'whype'] }, 'sampler.putStables[1]'],
   [
     'a stable as a call collateral',
-    { 'sampler.callCollaterals': ['khype', 'usdc'] },
+    { 'sampler.callCollaterals': ['whype', 'usdc'] },
     'sampler.callCollaterals[1]',
   ],
   ['an unknown log level', { logLevel: 'verbose' }, 'logLevel'],

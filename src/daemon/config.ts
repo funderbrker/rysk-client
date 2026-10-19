@@ -25,8 +25,8 @@ export type AppConfig = {
 };
 
 /**
- * The research sampler (spec §9.2); `putStables` (USDC, USDT0, USDH) and `callCollaterals` (WHYPE, kHYPE, LHYPE,
- * wstHYPE) are token addresses.
+ * The research sampler (spec §9.2); `putStables` (USDC, USDT0, USDH) and `callCollaterals` (WHYPE only) are token
+ * addresses.
  */
 export type SamplerConfig = {
   enabled: boolean;
@@ -124,8 +124,11 @@ const address = z.string().transform((value, ctx) => {
 
 /** The sampler's put legs: USD stables only (a put's strike asset and collateral). */
 const PUT_STABLES: readonly TokenKey[] = ['USDC', 'USDT0', 'USDH'];
-/** The sampler's call legs: HYPE collaterals only (a call is collateralized by its underlying). */
-const CALL_COLLATERALS: readonly TokenKey[] = ['WHYPE', 'KHYPE', 'LHYPE', 'WSTHYPE'];
+/**
+ * The sampler's call legs: WHYPE only. The kHYPE, LHYPE and wstHYPE legs were dropped on the operator's ruling that
+ * no makers quote them.
+ */
+const CALL_COLLATERALS: readonly TokenKey[] = ['WHYPE'];
 
 /** A token symbol in any case (`usdc`, `KHYPE`) among `allowed`, resolved to its address. */
 function tokenAddress(allowed: readonly TokenKey[], kind: string) {

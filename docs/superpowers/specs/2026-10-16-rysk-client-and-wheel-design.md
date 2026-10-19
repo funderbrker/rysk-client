@@ -35,7 +35,8 @@ real quotes, exercises the whole trade path up to the signature, and records eve
 ### 1.2 Out of scope (v1)
 
 - Trading USDT0 or USDH products, or liquid-staking collateral (kHYPE, wstHYPE, LHYPE). The research
-  sampler records their quotes; the strategy trades only USDC + WHYPE.
+  sampler records USDT0 put quotes; the liquid-staking call legs are not sampled (dropped 2026-10-19 on the
+  operator's ruling that no makers quote them); the strategy trades only USDC + WHYPE.
 - Wrapping native HYPE to WHYPE (the wallet already holds WHYPE), early close, other underlyings.
 - Database, dashboard, push alerts, multi-wallet, multi-host, testnet, chains other than 999.
 - The items in §13 Future work.
@@ -767,7 +768,7 @@ signed `qtyWhype`); `*Pct` fields that scale bigints must be whole basis points 
 [0, 1]; `minAbsDelta ≤ maxAbsDelta`; `minHoursToExpiry ≤ maxDaysToExpiry`; `minQuoteTtlSec ≤ maxQuoteTtlSec`;
 rates and timeouts are positive integers, `safety.maxFeePerGasGwei` and `safety.unknownMaxWaitSec` included;
 `tickSeconds ≥ 5`; `sampler.putStables` names only USD stables (USDC, USDT0, USDH) and `sampler.callCollaterals`
-only HYPE collaterals (WHYPE, kHYPE, LHYPE, wstHYPE); mixed-case addresses must checksum; a live run refuses the
+only WHYPE; mixed-case addresses must checksum; a live run refuses the
 zero address. Notional amounts
 (`notionalLast24h6`, `maxNotionalPer24h6`) are `bigint` 6 dp: strike × qty for puts, spot × qty for calls.
 
@@ -815,8 +816,8 @@ group at a time across the streams; the RFQ streams and the inventory stream wai
 Defaults:
 
 - **Hourly sweep**: every listed HYPE combination, both sides, 25 contracts, `taker = zero`, pair legs
-  back-to-back in random order: puts USDC then USDT0; calls WHYPE, kHYPE, LHYPE, wstHYPE. The sweep is built
-  from the listings at its start; at 6 RFQ/min its ~140 legs take about 25 minutes while the listed strikes change
+  back-to-back in random order: puts USDC then USDT0; calls WHYPE. The sweep is built
+  from the listings at its start; at 6 RFQ/min its ~70 legs take about 12 minutes while the listed strikes change
   about once a minute, so each leg is checked against `deps.listings()` when its turn comes and skipped (no RFQ, no
   token) when its instrument is no longer listed (the server would refuse it as a custom strike for the zero taker,
   §1.2). A finished sweep writes one `{ purpose: 'sweep-summary', run, legs, sent, skippedUnlisted }` record to
@@ -839,8 +840,7 @@ Defaults:
 Sampler `quotes` records take spot from the loop's latest snapshot (the WHYPE asset price, `spotSource: 'asset'`)
 and fall back to the listings' index (`'index'`) before the first snapshot, or `spotE8: null` with
 `spotSource: 'none'` when neither is a price; their TTL is on the local clock. The config restricts
-`sampler.putStables` to USD stables (USDC, USDT0, USDH) and `sampler.callCollaterals` to HYPE collaterals (WHYPE,
-kHYPE, LHYPE, wstHYPE).
+`sampler.putStables` to USD stables (USDC, USDT0, USDH) and `sampler.callCollaterals` to WHYPE.
 
 ### 9.3 Recorder
 
@@ -935,7 +935,7 @@ succeeded (`sha === null`) the tripwire is inactive and startup says so.
 
 `node:util parseArgs` with the subcommand in `positionals[0]`: `run [--live] [--max-trades N] [--config
 path] [--no-sampler]`, `state`, `quote --side put|call --strike 78.5 --expiry <sec> [--qty 25] [--collateral
-whype|khype|lhype|wsthype] [--usd usdc|usdt0]` (one RFQ with `taker = account.address`, gas preview and maker
+whype] [--usd usdc|usdt0]` (one RFQ with `taker = account.address`, gas preview and maker
 check, no trade), `history --from --to --out`, `wallet` (address, balances, allowances, vault counter, nonces),
 `basis suggest-anchor`. Script `"rysk": "node src/cli/main.ts"`. Every command takes `--config` (default
 `config.json`). `parseCli` is pure and strict (stray positionals and unknown flags are usage errors, exit 2;
@@ -1289,7 +1289,7 @@ wireDaemon(config: AppConfig, opts: WireOptions): Wired;
               "maxHypeExposurePct": null, "pauseOnFrontendChange": true },
   "sampler": { "enabled": true, "sweepEveryMin": 60, "pinned": 4, "pinnedEveryMin": 5, "takerPairEveryMin": 60,
                "inventoryEveryMin": 5, "publicFillsEveryMin": 60, "requestTimeoutMs": 6000,
-               "putStables": ["usdc", "usdt0"], "callCollaterals": ["whype", "khype", "lhype", "wsthype"] }
+               "putStables": ["usdc", "usdt0"], "callCollaterals": ["whype"] }
 }
 ```
 

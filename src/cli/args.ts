@@ -11,7 +11,7 @@ Commands:
   state [--config path]
       Print the derived wheel state and each side's gates.
   quote --side put|call --strike 78.5 --expiry <sec> [--qty 25]
-        [--collateral whype|khype|lhype|wsthype] [--usd usdc|usdt0] [--config path]
+        [--collateral whype] [--usd usdc|usdt0] [--config path]
       Request one quote and print it; never trades.
   history --from <sec> --to <sec> --out <file> [--config path]
       Write the public fills in the window to a JSONL file.
@@ -34,7 +34,8 @@ export class UsageError extends Error {
 }
 
 export type UsdSymbol = 'usdc' | 'usdt0';
-export type CallCollateralSymbol = 'whype' | 'khype' | 'lhype' | 'wsthype';
+/** WHYPE only: the liquid-staking collaterals were dropped (no makers quote them). */
+export type CallCollateralSymbol = 'whype';
 
 export type RunCommand = { cmd: 'run'; live: boolean; maxTrades?: number; sampler: boolean; config: string };
 export type StateCommand = { cmd: 'state'; config: string };
@@ -67,7 +68,7 @@ type Values = Record<string, string | boolean | (string | boolean)[] | undefined
 const DEFAULT_CONFIG = 'config.json';
 const DEFAULT_QUANTITY = '25';
 const USD_SYMBOLS: readonly string[] = ['usdc', 'usdt0'];
-const CALL_COLLATERALS: readonly string[] = ['whype', 'khype', 'lhype', 'wsthype'];
+const CALL_COLLATERALS: readonly string[] = ['whype'];
 const POSITIVE_INTEGER = /^[1-9][0-9]*$/;
 const INTEGER = /^[0-9]+$/;
 const STRIKE = /^[0-9]+(?:\.[0-9]{1,8})?$/;
@@ -187,7 +188,7 @@ function collateralOf(side: Side, usd: UsdSymbol, flag: string | undefined): Quo
   }
   if (collateral === undefined) return 'whype';
   if (isCallCollateral(collateral)) return collateral;
-  throw new UsageError(`--collateral of a call must be whype, khype, lhype or wsthype, not '${collateral}'`);
+  throw new UsageError(`--collateral of a call must be whype, not '${collateral}'`);
 }
 
 function parseHistory(args: string[]): HistoryCommand {

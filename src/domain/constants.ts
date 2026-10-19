@@ -57,12 +57,11 @@ export const TRADED_PRODUCTS: { put: Product; call: Product } = {
 };
 
 export const SAMPLED_PUT_STABLES: Address[] = [TOKENS.USDC.address, TOKENS.USDT0.address];
-export const SAMPLED_CALL_COLLATERALS: Address[] = [
-  TOKENS.WHYPE.address,
-  TOKENS.KHYPE.address,
-  TOKENS.LHYPE.address,
-  TOKENS.WSTHYPE.address,
-];
+/**
+ * WHYPE only: the kHYPE, LHYPE and wstHYPE call legs were dropped on the operator's ruling that no makers quote
+ * them. Their tokens stay in `TOKENS` so a wallet row collateralized in one still classifies (`hypeForeignCollateral`).
+ */
+export const SAMPLED_CALL_COLLATERALS: Address[] = [TOKENS.WHYPE.address];
 
 /**
  * Check C10's outer band around spot, in basis points of spot: a put strike at least 0.6 × spot, a call strike at
