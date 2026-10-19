@@ -431,6 +431,11 @@ node scripts/bid-range.mjs --series --purpose sweep,pinned data/quotes   # every
 ```
 Paths may be files or directories; strategy records (`candidate`, `fallback-custom`) are included unless `--purpose` filters them out.
 
+How bids move over short horizons, against the HYPE spot over the same gap:
+```sh
+node scripts/bid-moves.mjs --horizons 5,15,60 data/quotes   # per horizon: |Δbid| and |Δspot| quantiles, bid % per 1 % of spot by side, the part spot does not explain, moves while spot was flat, same maker vs a maker switch; then each instrument's range
+```
+
 Shell one-liners with `jq`, and SQL for DuckDB (`duckdb` CLI or its Python package). Run them from the repository directory.
 
 ```sh
