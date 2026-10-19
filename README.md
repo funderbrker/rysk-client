@@ -421,6 +421,13 @@ A finished sweep also writes one summary to `quotes`: `{ purpose: "sweep-summary
 
 ### Analyzing the streams
 
+The range of maker bids, with the HYPE spot at the time of each bid, per instrument and product leg:
+```sh
+node scripts/bid-range.mjs                       # table over data/quotes: n, makers, bid min..max and median (USD per contract), gross APR range, spot range, first and last bid
+node scripts/bid-range.mjs --series --purpose sweep,pinned data/quotes   # every bid as a TSV row: time, purpose, instrument, leg, maker, bid, spot, APR
+```
+Paths may be files or directories; strategy records (`candidate`, `fallback-custom`) are included unless `--purpose` filters them out.
+
 Shell one-liners with `jq`, and SQL for DuckDB (`duckdb` CLI or its Python package). Run them from the repository directory.
 
 ```sh
